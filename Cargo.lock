@@ -4535,6 +4535,7 @@ dependencies = [
  "rustls-platform-verifier",
  "serde",
  "serde_json",
+ "serde_urlencoded",
  "sync_wrapper",
  "tokio",
  "tokio-rustls",
@@ -6381,7 +6382,10 @@ dependencies = [
  "anyhow",
  "dotenvy",
  "gpui",
+ "reqwest",
  "rig-core",
+ "serde",
+ "serde_json",
  "tokio",
 ]
 
