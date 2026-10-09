@@ -1,8 +1,4 @@
-//! A minimal client for Alpaca's market data REST API (v2 stocks).
-//!
-//! Written in-house rather than pulling in a third-party SDK: Alpaca has no
-//! official Rust crate, and this keeps the supply chain to reqwest + serde.
-//! Must run on the tokio runtime; see [`crate::runtime`].
+//! Market data: snapshots and historical bars (v2 stocks).
 //!
 //! Docs: <https://docs.alpaca.markets/reference/stocksnapshots-1>
 
@@ -11,47 +7,24 @@
 
 use std::{collections::HashMap, fmt};
 
-use anyhow::{Context as _, Result, bail};
+use anyhow::{Result, bail};
 use chrono::{DateTime, SecondsFormat, Utc};
+use reqwest::Method;
 use serde::Deserialize;
-use serde::de::DeserializeOwned;
 
-const DEFAULT_DATA_URL: &str = "https://data.alpaca.markets";
-
-pub struct AlpacaClient {
-    http: reqwest::Client,
-    key_id: String,
-    secret_key: String,
-    data_url: String,
-    /// `iex` (free), `sip` (paid), or `delayed_sip`.
-    feed: String,
-}
+use super::{AlpacaClient, send_json};
 
 impl AlpacaClient {
-    /// Reads `APCA_API_KEY_ID` and `APCA_API_SECRET_KEY`, plus the optional
-    /// `APCA_API_DATA_URL` and `APCA_DATA_FEED` (defaults to `iex`).
-    pub fn from_env() -> Result<Self> {
-        let var = |name: &str| std::env::var(name).with_context(|| format!("{name} is not set"));
-        Ok(Self {
-            http: reqwest::Client::new(),
-            key_id: var("APCA_API_KEY_ID")?,
-            secret_key: var("APCA_API_SECRET_KEY")?,
-            data_url: var("APCA_API_DATA_URL").unwrap_or_else(|_| DEFAULT_DATA_URL.into()),
-            feed: var("APCA_DATA_FEED").unwrap_or_else(|_| "iex".into()),
-        })
-    }
-
     /// Latest trade, quote, and minute/daily bars for each symbol. Symbols
     /// Alpaca doesn't recognize are absent from the result.
     pub async fn snapshots(&self, symbols: &[String]) -> Result<HashMap<String, Snapshot>> {
-        self.get(
-            "/v2/stocks/snapshots",
-            &[
+        let request = self
+            .data_request(Method::GET, "/v2/stocks/snapshots")
+            .query(&[
                 ("symbols", symbols.join(",").as_str()),
                 ("feed", &self.feed),
-            ],
-        )
-        .await
+            ]);
+        send_json(request).await
     }
 
     /// Historical bars for `symbol` since `start`, oldest first, following
@@ -86,35 +59,13 @@ impl AlpacaClient {
             if let Some(token) = page_token.as_deref() {
                 query.push(("page_token", token));
             }
-            let page: Page = self.get(&path, &query).await?;
+            let page: Page = send_json(self.data_request(Method::GET, &path).query(&query)).await?;
             bars.extend(page.bars.unwrap_or_default());
             match page.next_page_token {
                 Some(token) => page_token = Some(token),
                 None => return Ok(bars),
             }
         }
-    }
-
-    async fn get<T: DeserializeOwned>(&self, path: &str, query: &[(&str, &str)]) -> Result<T> {
-        let response = self
-            .http
-            .get(format!("{}{path}", self.data_url))
-            .header("APCA-API-KEY-ID", &self.key_id)
-            .header("APCA-API-SECRET-KEY", &self.secret_key)
-            .query(query)
-            .send()
-            .await
-            .with_context(|| format!("GET {path} failed"))?;
-
-        let status = response.status();
-        if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-            bail!("Alpaca GET {path} returned {status}: {body}");
-        }
-        response
-            .json()
-            .await
-            .with_context(|| format!("decoding Alpaca GET {path}"))
     }
 }
 

@@ -1,9 +1,13 @@
 //! Price history chart: the selectable time ranges and a line/area renderer.
 
 use chrono::{DateTime, Duration, FixedOffset, Local, Utc};
-use gpui::{Bounds, Hsla, IntoElement, PathBuilder, Pixels, Rgba, Styled, canvas, point, px};
+use gpui::{
+    Bounds, IntoElement, PathBuilder, Pixels, Point, Styled, canvas, fill, linear_color_stop,
+    linear_gradient, point, px, rgb, size,
+};
 
 use crate::market::alpaca::{Bar, Timeframe};
+use crate::theme::{BORDER, MUTED, tint};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChartRange {
@@ -71,65 +75,112 @@ impl ChartRange {
     }
 }
 
-/// A line chart of closing prices with a translucent fill beneath it. Fills
+/// A line chart of closing prices: faint gridlines, a dashed baseline at the
+/// first close, a gradient fill, and a marker on the latest price. Fills
 /// whatever space its parent gives it.
-pub fn price_chart(closes: Vec<f64>, color: Rgba) -> impl IntoElement {
+pub fn price_chart(closes: Vec<f64>, color: u32) -> impl IntoElement {
     canvas(
         |_, _, _| {},
         move |bounds, _, window, _| {
-            let Some(points) = plot_points(&closes, bounds) else {
+            let Some(plot) = Plot::new(&closes, bounds) else {
                 return;
             };
 
-            let mut area = PathBuilder::fill();
-            area.move_to(point(points[0].x, bounds.bottom()));
-            for &p in &points {
-                area.line_to(p);
-            }
-            area.line_to(point(points[points.len() - 1].x, bounds.bottom()));
-            area.close();
-            if let Ok(path) = area.build() {
-                window.paint_path(path, Hsla::from(color).opacity(0.15));
+            for i in 1..GRID_LINES {
+                let y = bounds.top() + bounds.size.height * (i as f32 / GRID_LINES as f32);
+                let mut grid = PathBuilder::stroke(px(1.));
+                grid.move_to(point(bounds.left(), y));
+                grid.line_to(point(bounds.right(), y));
+                if let Ok(path) = grid.build() {
+                    window.paint_path(path, tint(BORDER, 0.7));
+                }
             }
 
-            let mut line = PathBuilder::stroke(px(2.));
+            let baseline_y = plot.y(closes[0]);
+            let mut baseline = PathBuilder::stroke(px(1.)).dash_array(&[px(3.), px(3.)]);
+            baseline.move_to(point(bounds.left(), baseline_y));
+            baseline.line_to(point(bounds.right(), baseline_y));
+            if let Ok(path) = baseline.build() {
+                window.paint_path(path, tint(MUTED, 0.6));
+            }
+
+            let points = &plot.points;
+            let last = points[points.len() - 1];
+            let mut area = PathBuilder::fill();
+            area.move_to(point(points[0].x, bounds.bottom()));
+            for &p in points {
+                area.line_to(p);
+            }
+            area.line_to(point(last.x, bounds.bottom()));
+            area.close();
+            if let Ok(path) = area.build() {
+                window.paint_path(
+                    path,
+                    linear_gradient(
+                        180.,
+                        linear_color_stop(tint(color, 0.22), 0.),
+                        linear_color_stop(tint(color, 0.), 1.),
+                    ),
+                );
+            }
+
+            let mut line = PathBuilder::stroke(px(1.5));
             line.move_to(points[0]);
             for &p in &points[1..] {
                 line.line_to(p);
             }
             if let Ok(path) = line.build() {
-                window.paint_path(path, color);
+                window.paint_path(path, rgb(color));
+            }
+
+            for (radius, alpha) in [(6., 0.18), (3., 1.)] {
+                let r = px(radius);
+                let dot = Bounds::new(point(last.x - r, last.y - r), size(r * 2., r * 2.));
+                window.paint_quad(fill(dot, tint(color, alpha)).corner_radii(r));
             }
         },
     )
     .size_full()
 }
 
-/// Map closes onto `bounds`, leaving a little vertical headroom.
-fn plot_points(closes: &[f64], bounds: Bounds<Pixels>) -> Option<Vec<gpui::Point<Pixels>>> {
-    if closes.len() < 2 {
-        return None;
-    }
-    let (min, max) = closes
-        .iter()
-        .fold((f64::MAX, f64::MIN), |(lo, hi), &c| (lo.min(c), hi.max(c)));
-    let pad = ((max - min) * 0.05).max(max.abs() * 0.001);
-    let (min, max) = (min - pad, max + pad);
+const GRID_LINES: usize = 4;
 
-    let width = f64::from(bounds.size.width);
-    let height = f64::from(bounds.size.height);
-    let step = width / (closes.len() - 1) as f64;
-    Some(
-        closes
+/// Closes mapped onto the chart's bounds, with a little vertical headroom.
+struct Plot {
+    points: Vec<Point<Pixels>>,
+    min: f64,
+    max: f64,
+    bounds: Bounds<Pixels>,
+}
+
+impl Plot {
+    fn new(closes: &[f64], bounds: Bounds<Pixels>) -> Option<Self> {
+        if closes.len() < 2 {
+            return None;
+        }
+        let (min, max) = closes
+            .iter()
+            .fold((f64::MAX, f64::MIN), |(lo, hi), &c| (lo.min(c), hi.max(c)));
+        let pad = ((max - min) * 0.08).max(max.abs() * 0.001);
+        let mut plot = Self {
+            points: Vec::with_capacity(closes.len()),
+            min: min - pad,
+            max: max + pad,
+            bounds,
+        };
+        let step = f32::from(bounds.size.width) / (closes.len() - 1) as f32;
+        plot.points = closes
             .iter()
             .enumerate()
-            .map(|(i, &c)| {
-                let x = i as f64 * step;
-                let y = (max - c) / (max - min) * height;
-                point(bounds.left() + px(x as f32), bounds.top() + px(y as f32))
-            })
-            .collect(),
-    )
+            .map(|(i, &c)| point(bounds.left() + px(i as f32 * step), plot.y(c)))
+            .collect();
+        Some(plot)
+    }
+
+    fn y(&self, value: f64) -> Pixels {
+        let fraction = ((self.max - value) / (self.max - self.min)) as f32;
+        self.bounds.top() + self.bounds.size.height * fraction
+    }
 }
 
 #[cfg(test)]

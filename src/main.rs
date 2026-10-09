@@ -1,25 +1,29 @@
 mod ai;
 mod chart;
 mod market;
+mod portfolio;
 mod runtime;
+mod theme;
 
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use chrono::Utc;
 use gpui::{
-    App, Bounds, Context, Div, ElementId, Rgba, SharedString, Stateful, Window, WindowBounds,
-    WindowOptions, div, prelude::*, px, rgb, size,
+    App, Bounds, Context, Div, ElementId, FontWeight, SharedString, Stateful, TitlebarOptions,
+    Window, WindowBounds, WindowOptions, div, point, prelude::*, px, rgb, size, transparent_black,
 };
 
 use chart::ChartRange;
 use market::alpaca::{AlpacaClient, Bar, Snapshot};
+use portfolio::Portfolio;
+use theme::*;
 
 const DEFAULT_WATCHLIST: &[&str] = &["SPY", "QQQ", "AAPL", "MSFT", "NVDA"];
-
-const GREEN: u32 = 0xa6e3a1;
-const RED: u32 = 0xf38ba8;
-const MUTED: u32 = 0x6c7086;
-const WARNING: u32 = 0xf9e2af;
+const REFRESH_INTERVAL: Duration = Duration::from_secs(10);
+/// The header doubles as the (transparent) title bar.
+const HEADER_HEIGHT: f32 = 38.;
+/// Room for the macOS traffic lights at the left of the header.
+const TRAFFIC_LIGHT_INSET: f32 = 80.;
 
 struct Warren {
     alpaca: Option<Arc<AlpacaClient>>,
@@ -32,6 +36,7 @@ struct Warren {
     chart_status: SharedString,
     /// Bumped per chart request so a slow, superseded response is dropped.
     chart_generation: u64,
+    portfolio: Portfolio,
     claude_status: SharedString,
 }
 
@@ -52,10 +57,27 @@ impl Warren {
             bars: Vec::new(),
             chart_status: "".into(),
             chart_generation: 0,
+            portfolio: Portfolio::default(),
             claude_status: "".into(),
         };
         this.refresh_quotes(cx);
         this.load_chart(cx);
+        this.refresh_portfolio(cx);
+
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(REFRESH_INTERVAL).await;
+                let alive = this.update(cx, |this, cx| {
+                    this.refresh_quotes(cx);
+                    this.refresh_portfolio(cx);
+                });
+                if alive.is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
+
         this
     }
 
@@ -83,6 +105,7 @@ impl Warren {
     fn select(&mut self, symbol: String, cx: &mut Context<Self>) {
         if symbol != self.selected {
             self.selected = symbol;
+            self.clear_pending_order();
             self.load_chart(cx);
         }
     }
@@ -149,6 +172,35 @@ impl Warren {
         .detach();
     }
 
+    fn render_watchlist(&self, cx: &mut Context<Self>) -> Div {
+        let rows: Vec<_> = self
+            .watchlist
+            .iter()
+            .map(|symbol| self.render_row(symbol, cx))
+            .collect();
+
+        div()
+            .flex()
+            .flex_col()
+            .w(px(200.))
+            .flex_none()
+            .p_2()
+            .gap_1()
+            .border_r_1()
+            .border_color(rgb(BORDER))
+            .child(div().px_2().pt_1().child(label("Watchlist")))
+            .child(div().flex().flex_col().children(rows))
+            .when(!self.market_status.is_empty(), |col| {
+                col.child(
+                    div()
+                        .px_2()
+                        .text_size(px(TEXT_XS))
+                        .text_color(rgb(WARNING))
+                        .child(self.market_status.clone()),
+                )
+            })
+    }
+
     fn render_row(&self, symbol: &str, cx: &mut Context<Self>) -> Stateful<Div> {
         let snapshot = self.snapshots.get(symbol);
         let price = snapshot
@@ -163,19 +215,29 @@ impl Warren {
             .id(ElementId::Name(symbol.clone().into()))
             .flex()
             .flex_row()
+            .items_center()
             .px_2()
             .py_1()
-            .rounded_md()
+            .border_l_2()
+            .border_color(transparent_black())
             .cursor_pointer()
-            .when(selected, |row| row.bg(rgb(0x313244)))
-            .when(!selected, |row| row.hover(|style| style.bg(rgb(0x181825))))
-            .child(div().w(px(70.)).child(symbol.clone()))
-            .child(div().w(px(90.)).flex().justify_end().child(price))
+            .when(selected, |row| {
+                row.bg(rgb(SELECTED)).border_color(rgb(ACCENT))
+            })
+            .when(!selected, |row| row.hover(|style| style.bg(rgb(HOVER))))
             .child(
                 div()
-                    .w(px(90.))
+                    .flex_1()
+                    .font_weight(FontWeight::MEDIUM)
+                    .child(symbol.clone()),
+            )
+            .child(div().w(px(64.)).flex().justify_end().child(price))
+            .child(
+                div()
+                    .w(px(60.))
                     .flex()
                     .justify_end()
+                    .text_size(px(TEXT_SM))
                     .text_color(change_color)
                     .child(change_text),
             )
@@ -190,36 +252,36 @@ impl Warren {
             .map(|(first, last)| (last.close - first.close) / first.close * 100.0);
         let (change_text, change_color) = format_change(range_change);
         let line_color = match range_change {
-            Some(c) if c < 0.0 => rgb(RED),
-            _ => rgb(GREEN),
+            Some(c) if c < 0.0 => RED,
+            _ => GREEN,
         };
 
         let header = div()
             .flex()
             .flex_row()
             .items_baseline()
-            .gap_3()
-            .child(div().text_2xl().child(self.selected.clone()))
+            .gap_2()
+            .child(
+                div()
+                    .text_size(px(TEXT_LG))
+                    .font_weight(FontWeight::BOLD)
+                    .child(self.selected.clone()),
+            )
             .child(last.map_or("".into(), |bar| format!("{:.2}", bar.close)))
-            .child(div().text_color(change_color).child(change_text));
+            .child(
+                div()
+                    .text_size(px(TEXT_SM))
+                    .text_color(change_color)
+                    .child(change_text),
+            );
 
         let range_buttons =
             div()
                 .flex()
                 .flex_row()
-                .gap_1()
+                .gap_0p5()
                 .children(ChartRange::ALL.into_iter().map(|range| {
-                    let active = range == self.range;
-                    div()
-                        .id(range.label())
-                        .px_3()
-                        .py_1()
-                        .rounded_md()
-                        .cursor_pointer()
-                        .text_sm()
-                        .when(active, |b| b.bg(rgb(0x89b4fa)).text_color(rgb(0x1e1e2e)))
-                        .when(!active, |b| b.hover(|style| style.bg(rgb(0x313244))))
-                        .child(range.label())
+                    ghost_button(range.label(), range.label(), range == self.range)
                         .on_click(cx.listener(move |this, _, _, cx| this.set_range(range, cx)))
                 }));
 
@@ -230,6 +292,14 @@ impl Warren {
                 (hi.max(bar.high), lo.min(bar.low))
             });
 
+        let axis_text = || {
+            div()
+                .flex()
+                .flex_row()
+                .text_size(px(TEXT_XS))
+                .text_color(rgb(MUTED))
+        };
+
         let body: Div = if self.chart_status.is_empty() {
             let closes = self.bars.iter().map(|bar| bar.close).collect();
             div()
@@ -238,23 +308,15 @@ impl Warren {
                 .flex_1()
                 .gap_1()
                 .child(
-                    div()
-                        .flex()
-                        .flex_row()
-                        .gap_4()
-                        .text_sm()
-                        .text_color(rgb(MUTED))
-                        .child(format!("High {high:.2}"))
-                        .child(format!("Low {low:.2}")),
+                    axis_text()
+                        .gap_3()
+                        .child(format!("H {high:.2}"))
+                        .child(format!("L {low:.2}")),
                 )
                 .child(div().flex_1().child(chart::price_chart(closes, line_color)))
                 .child(
-                    div()
-                        .flex()
-                        .flex_row()
+                    axis_text()
                         .justify_between()
-                        .text_sm()
-                        .text_color(rgb(MUTED))
                         .children(first.map(|bar| self.range.format_time(bar.timestamp)))
                         .children(last.map(|bar| self.range.format_time(bar.timestamp))),
                 )
@@ -264,6 +326,7 @@ impl Warren {
                 .flex()
                 .items_center()
                 .justify_center()
+                .text_size(px(TEXT_SM))
                 .text_color(rgb(MUTED))
                 .child(self.chart_status.clone())
         };
@@ -272,7 +335,8 @@ impl Warren {
             .flex()
             .flex_col()
             .flex_1()
-            .gap_3()
+            .p_3()
+            .gap_2()
             .child(
                 div()
                     .flex()
@@ -286,88 +350,89 @@ impl Warren {
     }
 }
 
-fn format_change(change: Option<f64>) -> (String, Rgba) {
-    match change {
-        Some(c) if c >= 0.0 => (format!("+{c:.2}%"), rgb(GREEN)),
-        Some(c) => (format!("{c:.2}%"), rgb(RED)),
-        None => ("—".into(), rgb(MUTED)),
-    }
-}
-
-fn button(id: impl Into<ElementId>, label: &'static str) -> Stateful<Div> {
-    div()
-        .id(id)
-        .px_4()
-        .py_2()
-        .rounded_md()
-        .bg(rgb(0x89b4fa))
-        .text_color(rgb(0x1e1e2e))
-        .cursor_pointer()
-        .hover(|style| style.bg(rgb(0xb4befe)))
-        .child(label)
-}
-
 impl Render for Warren {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let rows: Vec<_> = self
-            .watchlist
-            .iter()
-            .map(|symbol| self.render_row(symbol, cx))
-            .collect();
+        let header = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_4()
+            .h(px(HEADER_HEIGHT))
+            .pl(px(TRAFFIC_LIGHT_INSET))
+            .pr_3()
+            .border_b_1()
+            .border_color(rgb(BORDER))
+            .child(
+                div()
+                    .text_size(px(TEXT_BASE))
+                    .font_weight(FontWeight::BOLD)
+                    .text_color(rgb(ACCENT))
+                    .child("WARREN"),
+            )
+            .child(self.render_account_summary())
+            .child(div().flex_1())
+            .child(
+                ghost_button("refresh", "Refresh", false).on_click(cx.listener(
+                    |this, _, _, cx| {
+                        this.refresh_quotes(cx);
+                        this.refresh_portfolio(cx);
+                    },
+                )),
+            );
+
+        let center = div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_w_0()
+            .child(self.render_chart_panel(cx))
+            .child(self.render_order_ticket(cx));
+
+        let footer = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_3()
+            .h(px(32.))
+            .px_2()
+            .border_t_1()
+            .border_color(rgb(BORDER))
+            .child(
+                ghost_button("ask-claude", "Ask Claude", false)
+                    .on_click(cx.listener(|this, _, _, cx| this.ask_claude(cx))),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .font_family(SANS)
+                    .truncate()
+                    .text_size(px(TEXT_SM))
+                    .text_color(rgb(MUTED))
+                    .child(self.claude_status.clone()),
+            );
 
         div()
             .flex()
             .flex_col()
-            .gap_4()
             .size_full()
-            .p_8()
-            .bg(rgb(0x1e1e2e))
-            .text_color(rgb(0xcdd6f4))
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .justify_between()
-                    .items_center()
-                    .child(div().text_3xl().child("Warren"))
-                    .child(
-                        button("refresh", "Refresh")
-                            .on_click(cx.listener(|this, _, _, cx| this.refresh_quotes(cx))),
-                    ),
-            )
+            .bg(rgb(BG))
+            .text_color(rgb(TEXT))
+            .font_family(MONO)
+            .text_size(px(TEXT_BASE))
+            .font_features(tabular_numbers())
+            .child(header)
             .child(
                 div()
                     .flex()
                     .flex_row()
                     .flex_1()
-                    .gap_8()
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap_2()
-                            .child(div().flex().flex_col().children(rows))
-                            .child(
-                                div()
-                                    .max_w(px(250.))
-                                    .text_color(rgb(WARNING))
-                                    .child(self.market_status.clone()),
-                            ),
-                    )
-                    .child(self.render_chart_panel(cx)),
+                    .min_h_0()
+                    .child(self.render_watchlist(cx))
+                    .child(center)
+                    .child(self.render_positions_and_orders(cx)),
             )
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap_4()
-                    .child(
-                        button("ask-claude", "Ask Claude")
-                            .on_click(cx.listener(|this, _, _, cx| this.ask_claude(cx))),
-                    )
-                    .child(div().flex_1().child(self.claude_status.clone())),
-            )
+            .child(footer)
     }
 }
 
@@ -375,10 +440,19 @@ fn main() {
     dotenvy::dotenv().ok();
 
     gpui_platform::application().run(|cx: &mut App| {
-        let bounds = Bounds::centered(None, size(px(1100.), px(700.)), cx);
+        if let Err(err) = theme::load_fonts(cx) {
+            eprintln!("failed to load bundled fonts: {err:#}");
+        }
+        let bounds = Bounds::centered(None, size(px(1200.), px(760.)), cx);
         cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
+                window_min_size: Some(size(px(760.), px(480.))),
+                titlebar: Some(TitlebarOptions {
+                    title: Some("Warren".into()),
+                    appears_transparent: true,
+                    traffic_light_position: Some(point(px(12.), px((HEADER_HEIGHT - 14.) / 2.))),
+                }),
                 ..Default::default()
             },
             |_, cx| cx.new(Warren::new),
