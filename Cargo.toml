@@ -1,0 +1,11 @@
+[package]
+name = "warren"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.104"
+dotenvy = "0.15.7"
+gpui = "0.2.2"
+rig-core = { version = "0.44", features = ["reqwest"] }
+tokio = { version = "1.53.2", features = ["rt-multi-thread", "macros"] }
