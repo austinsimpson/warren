@@ -6,12 +6,13 @@
 //!
 //! Docs: <https://docs.alpaca.markets/reference/stocksnapshots-1>
 
-// Bars and the full quote/trade fields are for upcoming charts and Claude tools.
+// The full quote/trade fields are for upcoming Claude tools.
 #![allow(dead_code)]
 
-use std::collections::HashMap;
+use std::{collections::HashMap, fmt};
 
 use anyhow::{Context as _, Result, bail};
+use chrono::{DateTime, SecondsFormat, Utc};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 
@@ -53,22 +54,32 @@ impl AlpacaClient {
         .await
     }
 
-    /// Historical bars for `symbol` from `start` (RFC 3339 or `YYYY-MM-DD`),
-    /// following pagination. `timeframe` is e.g. `1Min`, `1Hour`, `1Day`.
-    pub async fn bars(&self, symbol: &str, timeframe: &str, start: &str) -> Result<Vec<Bar>> {
+    /// Historical bars for `symbol` since `start`, oldest first, following
+    /// pagination.
+    pub async fn bars(
+        &self,
+        symbol: &str,
+        timeframe: Timeframe,
+        start: DateTime<Utc>,
+    ) -> Result<Vec<Bar>> {
         #[derive(Deserialize)]
         struct Page {
             bars: Option<Vec<Bar>>,
             next_page_token: Option<String>,
         }
 
+        if !timeframe.is_valid() {
+            bail!("Alpaca does not support a {timeframe:?} bar timeframe");
+        }
+        let timeframe = timeframe.to_string();
         let path = format!("/v2/stocks/{symbol}/bars");
+        let start = start.to_rfc3339_opts(SecondsFormat::Secs, true);
         let mut bars = Vec::new();
         let mut page_token: Option<String> = None;
         loop {
             let mut query = vec![
-                ("timeframe", timeframe),
-                ("start", start),
+                ("timeframe", timeframe.as_str()),
+                ("start", start.as_str()),
                 ("feed", &self.feed),
                 ("limit", "10000"),
             ];
@@ -107,6 +118,41 @@ impl AlpacaClient {
     }
 }
 
+/// Bar aggregation period. Alpaca accepts 1–59 minutes, 1–23 hours, one day,
+/// one week, or 1, 2, 3, 4, 6, or 12 months.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Timeframe {
+    Minutes(u8),
+    Hours(u8),
+    Day,
+    Week,
+    Months(u8),
+}
+
+impl Timeframe {
+    pub fn is_valid(self) -> bool {
+        match self {
+            Self::Minutes(n) => (1..=59).contains(&n),
+            Self::Hours(n) => (1..=23).contains(&n),
+            Self::Day | Self::Week => true,
+            Self::Months(n) => matches!(n, 1 | 2 | 3 | 4 | 6 | 12),
+        }
+    }
+}
+
+/// The query-string form Alpaca expects, e.g. `5Min`, `1Hour`, `1Day`.
+impl fmt::Display for Timeframe {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Minutes(n) => write!(f, "{n}Min"),
+            Self::Hours(n) => write!(f, "{n}Hour"),
+            Self::Day => f.write_str("1Day"),
+            Self::Week => f.write_str("1Week"),
+            Self::Months(n) => write!(f, "{n}Month"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Snapshot {
@@ -132,7 +178,7 @@ impl Snapshot {
 #[derive(Debug, Clone, Deserialize)]
 pub struct Trade {
     #[serde(rename = "t")]
-    pub timestamp: String,
+    pub timestamp: DateTime<Utc>,
     #[serde(rename = "p")]
     pub price: f64,
     #[serde(rename = "s")]
@@ -142,7 +188,7 @@ pub struct Trade {
 #[derive(Debug, Clone, Deserialize)]
 pub struct Quote {
     #[serde(rename = "t")]
-    pub timestamp: String,
+    pub timestamp: DateTime<Utc>,
     #[serde(rename = "bp")]
     pub bid_price: f64,
     #[serde(rename = "bs")]
@@ -156,7 +202,7 @@ pub struct Quote {
 #[derive(Debug, Clone, Deserialize)]
 pub struct Bar {
     #[serde(rename = "t")]
-    pub timestamp: String,
+    pub timestamp: DateTime<Utc>,
     #[serde(rename = "o")]
     pub open: f64,
     #[serde(rename = "h")]
@@ -197,6 +243,16 @@ mod tests {
         assert!((change - 2.888_888).abs() < 1e-4, "{change}");
 
         assert_eq!(snapshots["NEWCO"].change_percent(), None);
+    }
+
+    #[test]
+    fn timeframe_query_strings() {
+        assert_eq!(Timeframe::Minutes(5).to_string(), "5Min");
+        assert_eq!(Timeframe::Hours(1).to_string(), "1Hour");
+        assert_eq!(Timeframe::Day.to_string(), "1Day");
+        assert_eq!(Timeframe::Months(3).to_string(), "3Month");
+        assert!(!Timeframe::Minutes(60).is_valid());
+        assert!(!Timeframe::Months(5).is_valid());
     }
 
     #[test]

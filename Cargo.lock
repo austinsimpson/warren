@@ -5896,6 +5896,7 @@ name = "warren"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "dotenvy",
  "gpui",
  "gpui_platform",
