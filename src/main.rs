@@ -5,8 +5,8 @@ mod runtime;
 use std::{collections::HashMap, sync::Arc};
 
 use gpui::{
-    App, Application, Bounds, Context, Div, ElementId, SharedString, Stateful, Window,
-    WindowBounds, WindowOptions, div, prelude::*, px, rgb, size,
+    App, Bounds, Context, Div, ElementId, SharedString, Stateful, Window, WindowBounds,
+    WindowOptions, div, prelude::*, px, rgb, size,
 };
 
 use market::alpaca::{AlpacaClient, Snapshot};
@@ -145,7 +145,11 @@ impl Render for Warren {
                     .flex_col()
                     .children(self.watchlist.iter().map(|symbol| self.render_row(symbol))),
             )
-            .child(div().text_color(rgb(0xf9e2af)).child(self.market_status.clone()))
+            .child(
+                div()
+                    .text_color(rgb(0xf9e2af))
+                    .child(self.market_status.clone()),
+            )
             .child(
                 div()
                     .flex()
@@ -164,7 +168,7 @@ impl Render for Warren {
 fn main() {
     dotenvy::dotenv().ok();
 
-    Application::new().run(|cx: &mut App| {
+    gpui_platform::application().run(|cx: &mut App| {
         let bounds = Bounds::centered(None, size(px(800.), px(600.)), cx);
         cx.open_window(
             WindowOptions {

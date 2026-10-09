@@ -45,7 +45,10 @@ impl AlpacaClient {
     pub async fn snapshots(&self, symbols: &[String]) -> Result<HashMap<String, Snapshot>> {
         self.get(
             "/v2/stocks/snapshots",
-            &[("symbols", symbols.join(",").as_str()), ("feed", &self.feed)],
+            &[
+                ("symbols", symbols.join(",").as_str()),
+                ("feed", &self.feed),
+            ],
         )
         .await
     }
