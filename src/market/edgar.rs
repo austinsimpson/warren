@@ -94,6 +94,53 @@ impl EdgarClient {
             .collect())
     }
 
+    /// Every XBRL fact the company has filed: large (megabytes for big
+    /// filers), so callers cache it.
+    #[allow(dead_code)] // for the growth style, in progress
+    pub async fn company_facts(&self, cik: u64) -> Result<serde_json::Value> {
+        self.get_json(&format!(
+            "https://data.sec.gov/api/xbrl/companyfacts/CIK{cik:010}.json"
+        ))
+        .await
+    }
+
+    /// One figure for every company in one period, e.g. tag `Revenues`,
+    /// unit `USD`, period `CY2024Q3` (`CY2024Q3I` for point-in-time
+    /// figures, `CY2024` for years). Rows are (CIK, start, end, value).
+    #[allow(dead_code)] // for the growth style, in progress
+    pub async fn frame(
+        &self,
+        taxonomy: &str,
+        tag: &str,
+        unit: &str,
+        period: &str,
+    ) -> Result<Vec<(u64, Option<String>, String, f64)>> {
+        let url = format!(
+            "https://data.sec.gov/api/xbrl/frames/{taxonomy}/{tag}/{unit}/{period}.json"
+        );
+        let json: serde_json::Value = match self.get_json(&url).await {
+            Ok(json) => json,
+            // Periods nobody reported under this tag are 404s.
+            Err(err) if err.to_string().contains("404") => return Ok(Vec::new()),
+            Err(err) => return Err(err),
+        };
+        Ok(json["data"]
+            .as_array()
+            .map(|rows| {
+                rows.iter()
+                    .filter_map(|r| {
+                        Some((
+                            r["cik"].as_u64()?,
+                            r["start"].as_str().map(String::from),
+                            r["end"].as_str()?.to_string(),
+                            r["val"].as_f64()?,
+                        ))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default())
+    }
+
     pub async fn company(&self, cik: u64) -> Result<CompanyInfo> {
         #[derive(Deserialize)]
         #[serde(rename_all = "camelCase")]

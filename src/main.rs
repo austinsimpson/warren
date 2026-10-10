@@ -11,6 +11,7 @@ mod replay;
 mod runtime;
 mod scorecard;
 mod scorecard_ui;
+mod fundamentals;
 mod sectors;
 mod store;
 mod strategy;
