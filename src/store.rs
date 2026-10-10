@@ -92,6 +92,8 @@ pub struct RunRecord {
     pub jev_input_tokens: u64,
     #[serde(default)]
     pub jev_output_tokens: u64,
+    #[serde(default)]
+    pub web_searches: u64,
 }
 
 /// The most lessons kept; older ones are dropped as new ones arrive.
@@ -336,6 +338,7 @@ mod tests {
             cost_usd: None,
             jev_input_tokens: 0,
             jev_output_tokens: 0,
+            web_searches: 0,
         };
         store.append_run(&run(AgentKind::Research)).unwrap();
         store.append_run(&run(AgentKind::Executor)).unwrap();

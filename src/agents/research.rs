@@ -210,8 +210,34 @@ pub async fn run(ctx: &AgentCtx, symbol: &str) -> Result<ResearchReport> {
             },
             None => String::new(),
         };
-        let agent = ctx
-            .builder(AgentKind::Research, Some(&symbol), config, PREAMBLE.into())?
+        // Anthropic's hosted web search, live only: in a replay its results
+        // could be from after the replayed moment.
+        let searches = match ctx.as_of {
+            None => ctx.config.research.web_searches_per_stock,
+            Some(_) => 0,
+        };
+        let mut builder =
+            ctx.builder(AgentKind::Research, Some(&symbol), config, PREAMBLE.into())?;
+        if searches > 0 {
+            builder = builder.additional_params(serde_json::json!({
+                "tools": [{
+                    "type": "web_search_20250305",
+                    "name": "web_search",
+                    "max_uses": searches,
+                }],
+            }));
+        }
+        let search_note = if searches > 0 {
+            format!(
+                "\n\nYou may use web_search up to {searches} times to go beyond the news feed: \
+                 earnings releases and guidance, SEC filings, analyst actions, and what the \
+                 market already expects. Prefer primary sources, check each result's date, \
+                 and judge whether the news is already reflected in the price."
+            )
+        } else {
+            String::new()
+        };
+        let agent = builder
             .tool(GetAsset(ctx.clone()))
             .tool(GetQuotes(ctx.clone()))
             .tool(GetTechnicals(ctx.clone()))
@@ -222,7 +248,7 @@ pub async fn run(ctx: &AgentCtx, symbol: &str) -> Result<ResearchReport> {
         let research = agent
             .prompt_typed::<ResearchFindings>(format!(
                 "Research {symbol} now ({}) and return your report.\n\n\
-                 Computed factors (fixed; do not re-score):\n{}{sector}",
+                 Computed factors (fixed; do not re-score):\n{}{sector}{search_note}",
                 ctx.now().format("%Y-%m-%d %H:%M UTC"),
                 describe(&quant),
             ))
@@ -276,8 +302,13 @@ pub async fn run(ctx: &AgentCtx, symbol: &str) -> Result<ResearchReport> {
                 s.catalyst.score, s.news_sentiment.score
             )
         });
+        let searched = match ctx.meter.web_searches() {
+            0 => String::new(),
+            1 => " · 1 web search".to_string(),
+            n => format!(" · {n} web searches"),
+        };
         let summary = format!(
-            "{} {} conviction {:.2} [{}]{shadow}",
+            "{} {} conviction {:.2} [{}]{shadow}{searched}",
             symbol,
             report.rating,
             report.conviction,

@@ -37,6 +37,7 @@ pub struct UsageTotals {
     pub cached_input_tokens: u64,
     pub output_tokens: u64,
     pub jev_input_tokens: u64,
+    pub web_searches: u64,
     pub cost_usd: f64,
     /// Runs logged before costs were recorded, priced here from their token
     /// counts as if nothing was cached.
@@ -50,6 +51,7 @@ impl UsageTotals {
         self.cached_input_tokens += run.cached_input_tokens;
         self.output_tokens += run.output_tokens;
         self.jev_input_tokens += run.jev_input_tokens;
+        self.web_searches += run.web_searches;
         match run.cost_usd {
             Some(cost) => self.cost_usd += cost,
             None => {
@@ -603,16 +605,18 @@ pub fn render_factors(f: &FactorStudy) -> String {
 }
 
 fn render_text(usage: &Usage, card: &Scorecard) -> String {
-    let mut out =
-        String::from("usage            runs     input   cached   output      jev      cost\n");
+    let mut out = String::from(
+        "usage            runs     input   cached   output      jev searches      cost\n",
+    );
     let row = |label: &str, t: &UsageTotals| {
         format!(
-            "  {label:<12} {:>6} {:>9} {:>8} {:>8} {:>8} {:>9}\n",
+            "  {label:<12} {:>6} {:>9} {:>8} {:>8} {:>8} {:>8} {:>9}\n",
             t.runs,
             tokens(t.input_tokens),
             tokens(t.cached_input_tokens),
             tokens(t.output_tokens),
             tokens(t.jev_input_tokens),
+            t.web_searches,
             format!("${:.2}", t.cost_usd),
         )
     };
@@ -790,6 +794,7 @@ mod tests {
             cost_usd: cost,
             jev_input_tokens: 0,
             jev_output_tokens: 0,
+            web_searches: 0,
         };
         let u = usage(&[run(Some(0.5)), run(None)], &Config::default(), Utc::now());
         assert_eq!(u.all.runs, 2);

@@ -399,6 +399,7 @@ impl Strategy {
             },
             research: ResearchConfig {
                 agent: self.models.research.clone(),
+                ..global.research.clone()
             },
             executor: ExecutorConfig {
                 agent: self.models.executor.clone(),

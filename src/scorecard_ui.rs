@@ -245,7 +245,7 @@ impl Warren {
             rows.push(usage_row(&format!("  {kind}"), totals, false));
         }
         let header = [
-            "", "runs", "input", "cached", "output", "jev", "cost", "per run",
+            "", "runs", "input", "cached", "output", "jev", "searches", "cost", "per run",
         ];
         div()
             .id("usage")
@@ -269,7 +269,7 @@ impl Warren {
 }
 
 /// Fixed column widths for usage rows.
-const USAGE_COLUMNS: [f32; 8] = [90., 50., 70., 70., 70., 60., 70., 70.];
+const USAGE_COLUMNS: [f32; 9] = [90., 50., 70., 70., 70., 60., 70., 70., 70.];
 
 fn table_row(cells: Vec<Div>) -> Div {
     div()
@@ -301,6 +301,7 @@ fn usage_row(name: &str, t: &UsageTotals, strong: bool) -> Div {
         cell(tokens(t.cached_input_tokens)),
         cell(tokens(t.output_tokens)),
         cell(tokens(t.jev_input_tokens)),
+        cell(t.web_searches.to_string()),
         cell(format!("${:.2}", t.cost_usd)),
         cell(t.cost_per_run().map_or("–".into(), |c| format!("${c:.3}"))),
     ])

@@ -123,11 +123,24 @@ impl Default for ExplorationConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ResearchConfig {
     #[serde(flatten)]
     pub agent: AgentModel,
+    /// Anthropic web searches allowed per stock researched; 0 turns search
+    /// off. Never used in replays, where results could postdate the
+    /// replayed moment.
+    pub web_searches_per_stock: u32,
+}
+
+impl Default for ResearchConfig {
+    fn default() -> Self {
+        Self {
+            agent: AgentModel::default(),
+            web_searches_per_stock: 10,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

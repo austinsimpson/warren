@@ -135,11 +135,25 @@ pub struct RunUsage {
     pub model: Usage,
     pub jev_input_tokens: u64,
     pub jev_output_tokens: u64,
+    /// Anthropic web searches the model ran.
+    pub web_searches: u64,
 }
 
+/// Anthropic's web search fee, USD per search ($10 per 1,000). The results
+/// are billed as input tokens on top, which `Usage` already counts.
+pub const WEB_SEARCH_PRICE: f64 = 0.01;
+
 impl Meter {
-    fn add_turn(&self, usage: Usage) {
-        self.0.lock().unwrap().model += usage;
+    fn add_turn(&self, usage: Usage, raw: &serde_json::Value) {
+        let mut total = self.0.lock().unwrap();
+        total.model += usage;
+        total.web_searches += raw["usage"]["server_tool_use"]["web_search_requests"]
+            .as_u64()
+            .unwrap_or(0);
+    }
+
+    pub fn web_searches(&self) -> u64 {
+        self.0.lock().unwrap().web_searches
     }
 
     pub fn add_jev(&self, input_tokens: u64, output_tokens: u64) {
@@ -270,7 +284,9 @@ impl AgentCtx {
             cost_usd: model_cost(model, &usage.model).map(|cost| {
                 cost + usage.jev_input_tokens as f64 * self.config.jev.input_price_per_million
                     / 1_000_000.0
+                    + usage.web_searches as f64 * WEB_SEARCH_PRICE
             }),
+            web_searches: usage.web_searches,
             jev_input_tokens: usage.jev_input_tokens,
             jev_output_tokens: usage.jev_output_tokens,
         };
@@ -317,7 +333,7 @@ impl AgentHook for TraceHook {
         _: &HookContext,
         event: ModelTurnFinished<'_>,
     ) -> ModelTurnAction {
-        self.ctx.meter.add_turn(event.usage);
+        self.ctx.meter.add_turn(event.usage, event.raw);
         ModelTurnAction::Continue
     }
 
