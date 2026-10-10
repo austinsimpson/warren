@@ -650,7 +650,12 @@ impl Render for Warren {
 }
 
 fn main() {
-    dotenvy::dotenv().ok();
+    // From the working directory when run from the repo; a bundled app
+    // launched from Finder starts in `/`, so fall back to the repo it was
+    // built from.
+    if dotenvy::dotenv().is_err() {
+        dotenvy::from_path(concat!(env!("CARGO_MANIFEST_DIR"), "/.env")).ok();
+    }
 
     let args: Vec<String> = std::env::args().skip(1).collect();
     let command = match args.first().map(String::as_str) {
