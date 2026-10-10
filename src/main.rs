@@ -9,6 +9,7 @@ mod fundamentals;
 mod market;
 mod portfolio;
 mod replay;
+mod report_ui;
 mod runtime;
 mod scorecard;
 mod scorecard_ui;
@@ -52,6 +53,8 @@ struct Warren {
     chart_status: SharedString,
     /// Bumped per chart request so a slow, superseded response is dropped.
     chart_generation: u64,
+    /// Whether the full research report replaces the chart.
+    report_open: bool,
     /// The pointer over the chart: a hovered bar, or a drag between two.
     pointer: chart::Pointer,
     /// The chart's painted bounds, for mapping the pointer to a bar.
@@ -101,6 +104,7 @@ impl Warren {
             bars: Vec::new(),
             chart_status: "".into(),
             chart_generation: 0,
+            report_open: false,
             pointer: Default::default(),
             chart_bounds: Default::default(),
             portfolio: Portfolio::default(),
@@ -523,7 +527,7 @@ impl Warren {
                     .child(header)
                     .child(range_buttons),
             )
-            .children(self.render_research_card())
+            .children(self.render_research_card(cx))
             .child(body)
     }
 }
@@ -566,13 +570,16 @@ impl Render for Warren {
                 .flex_1()
                 .min_w_0()
                 .child(editor.clone()),
-            None => div()
-                .flex()
-                .flex_col()
-                .flex_1()
-                .min_w_0()
-                .child(self.render_chart_panel(cx))
-                .child(self.render_order_ticket(cx)),
+            None => match self.render_report(cx) {
+                Some(report) => div().flex().flex_col().flex_1().min_w_0().child(report),
+                None => div()
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_w_0()
+                    .child(self.render_chart_panel(cx))
+                    .child(self.render_order_ticket(cx)),
+            },
         };
 
         div()

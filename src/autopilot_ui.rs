@@ -7,7 +7,7 @@ use std::{
 };
 
 use chrono::Local;
-use gpui::{Context, Div, FontWeight, SharedString, div, prelude::*, px, rgb};
+use gpui::{Context, Div, FontWeight, SharedString, Stateful, div, prelude::*, px, rgb};
 
 use crate::agents::book::Book;
 use crate::agents::{
@@ -323,7 +323,7 @@ impl Warren {
     /// The selected symbol's research: levels, factor scores and trend
     /// health as context, the thesis, the top risks, and news highlights.
     /// There is no verdict; the executor decides.
-    pub fn render_research_card(&self) -> Option<Div> {
+    pub fn render_research_card(&self, cx: &mut Context<Self>) -> Option<Stateful<Div>> {
         let agents = self.agent()?;
         let report = agents.reports.get(&self.selected)?;
         let f = &report.findings;
@@ -367,6 +367,7 @@ impl Warren {
 
         Some(
             div()
+                .id("research-card")
                 .flex()
                 .flex_col()
                 .gap_1()
@@ -377,6 +378,9 @@ impl Warren {
                 .rounded_sm()
                 .border_1()
                 .border_color(rgb(BORDER))
+                .cursor_pointer()
+                .hover(|style| style.border_color(tint(ACCENT, 0.4)))
+                .on_click(cx.listener(|this, _, _, cx| this.open_report(cx)))
                 .child(
                     div()
                         .flex()
@@ -413,7 +417,9 @@ impl Warren {
                                 .child(label("r/r"))
                                 .child(format!("{rr:.1}:1"))
                         }))
-                        .child(label(format!("{}d · {age}", f.horizon_days))),
+                        .child(label(format!("{}d · {age}", f.horizon_days)))
+                        .child(div().flex_1())
+                        .child(label("full report ›").text_color(rgb(ACCENT))),
                 )
                 .child(
                     div()
@@ -496,7 +502,7 @@ impl Warren {
 }
 
 /// Bearish factor scores in red, neutral muted, bullish in green.
-fn score_color(score: u8) -> u32 {
+pub(crate) fn score_color(score: u8) -> u32 {
     match score {
         0..=2 => RED,
         3 => MUTED,
