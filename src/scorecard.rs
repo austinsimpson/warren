@@ -65,6 +65,18 @@ impl UsageTotals {
         }
     }
 
+    /// Fold `other`'s totals into these.
+    pub fn absorb(&mut self, other: &UsageTotals) {
+        self.runs += other.runs;
+        self.input_tokens += other.input_tokens;
+        self.cached_input_tokens += other.cached_input_tokens;
+        self.output_tokens += other.output_tokens;
+        self.jev_input_tokens += other.jev_input_tokens;
+        self.web_searches += other.web_searches;
+        self.cost_usd += other.cost_usd;
+        self.estimated_runs += other.estimated_runs;
+    }
+
     pub fn cost_per_run(&self) -> Option<f64> {
         (self.runs > 0).then(|| self.cost_usd / self.runs as f64)
     }

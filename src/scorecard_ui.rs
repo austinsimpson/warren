@@ -244,6 +244,29 @@ impl Warren {
         for (kind, totals) in &usage.by_agent {
             rows.push(usage_row(&format!("  {kind}"), totals, false));
         }
+        // Every agent side by side, and what they cost together.
+        let periods: [(&str, fn(&scorecard::Usage) -> &UsageTotals); 3] = [
+            ("today", |u| &u.today),
+            ("7 days", |u| &u.week),
+            ("all time", |u| &u.all),
+        ];
+        let mut combined = Vec::new();
+        if self.agents.len() > 1 {
+            for (period, pick) in periods {
+                let mut total = UsageTotals::default();
+                combined.push(label(format!("all agents · {period}")).mt_2());
+                for agent in &self.agents {
+                    let totals = pick(&agent.usage);
+                    total.absorb(totals);
+                    combined.push(usage_row(
+                        &format!("  {}", agent.ctx.strategy.name),
+                        totals,
+                        false,
+                    ));
+                }
+                combined.push(usage_row("  total", &total, true));
+            }
+        }
         let header = [
             "", "runs", "input", "cached", "output", "jev", "searches", "cost", "per run",
         ];
@@ -257,6 +280,7 @@ impl Warren {
             .text_size(px(TEXT_SM))
             .child(table_row(header.into_iter().map(label).collect()))
             .children(rows)
+            .children(combined)
             .children((usage.all.estimated_runs > 0).then(|| {
                 label(format!(
                     "{} older runs priced from token counts, assuming no prompt caching",
