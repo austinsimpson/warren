@@ -54,17 +54,18 @@ impl Warren {
     }
 
     fn refresh_scorecard(&mut self, cx: &mut Context<Self>) {
-        let (Some(alpaca), Some(agents)) = (self.alpaca.clone(), self.agents.as_ref()) else {
+        let (Some(alpaca), Some(agents)) = (self.alpaca.clone(), self.agent()) else {
             return;
         };
+        let (store, strategy) = (agents.store(), agents.ctx.strategy.clone());
         if self.scorecard.loading {
             return;
         }
         self.scorecard.loading = true;
-        let store = agents.store();
         cx.spawn(async move |this, cx| {
             let result =
-                runtime::run(async move { scorecard::compute(&alpaca, &store).await }).await;
+                runtime::run(async move { scorecard::compute(&alpaca, &store, &strategy).await })
+                    .await;
             this.update(cx, |this, cx| {
                 let state = &mut this.scorecard;
                 state.loading = false;
@@ -231,7 +232,7 @@ impl Warren {
     }
 
     fn render_usage(&self) -> impl IntoElement {
-        let Some(agents) = &self.agents else {
+        let Some(agents) = self.agent() else {
             return div().child(label("Usage unavailable")).into_any_element();
         };
         let usage = &agents.usage;

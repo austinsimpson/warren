@@ -9,6 +9,7 @@
 //! [`Store`] with its token usage. Runs execute on the tokio runtime.
 
 pub mod autopilot;
+pub mod book;
 pub mod executor;
 pub mod exploration;
 pub mod jev;
@@ -45,6 +46,7 @@ use tokio::sync::mpsc::UnboundedSender;
 use crate::config::{AgentModel, Config};
 use crate::market::alpaca::AlpacaClient;
 use crate::store::{RunRecord, Store};
+use crate::strategy::Strategy;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -68,6 +70,8 @@ impl fmt::Display for AgentKind {
 #[derive(Debug, Clone)]
 pub struct AgentEvent {
     pub at: DateTime<Utc>,
+    /// The strategy whose agent or scheduler emitted it.
+    pub strategy: String,
     /// `None` for scheduler messages.
     pub agent: Option<AgentKind>,
     pub subject: Option<String>,
@@ -105,6 +109,9 @@ pub struct AgentCtx {
     pub stop: Arc<AtomicBool>,
     /// Shadow scorer, when enabled and configured.
     pub jev: Option<Arc<jev::JevScorer>>,
+    /// The user-created agent this context runs for. `config` and `store`
+    /// are its own.
+    pub strategy: Arc<Strategy>,
     /// Token usage of the run this context belongs to; see
     /// [`AgentCtx::recorded`].
     pub meter: Meter,
@@ -153,6 +160,7 @@ impl AgentCtx {
     pub fn emit(&self, agent: Option<AgentKind>, subject: Option<&str>, kind: EventKind) {
         let _ = self.events.send(AgentEvent {
             at: Utc::now(),
+            strategy: self.strategy.id.clone(),
             agent,
             subject: subject.map(str::to_string),
             kind,
@@ -172,6 +180,9 @@ impl AgentCtx {
         preamble: String,
     ) -> Result<AgentBuilder> {
         let completion = Anthropic::from_env()?.completion(model.model.clone());
+        // Every stage learns this agent's horizon, universe, and the user's
+        // instructions.
+        let preamble = preamble + &self.strategy.prompt_context();
         Ok(AgentBuilder::new(completion)
             .preamble(preamble)
             // Every turn resends the conversation so far, so turns after the
@@ -339,10 +350,24 @@ fn clip(text: &str) -> String {
 }
 
 impl AgentCtx {
+    /// A context for `strategy` sharing this one's clients, event channel,
+    /// and Jev scorer, with its own store, config, and pause switch.
+    pub fn for_strategy(&self, strategy: Strategy, store: Arc<Store>, config: Arc<Config>) -> Self {
+        Self {
+            store,
+            config,
+            stop: Arc::new(AtomicBool::new(false)),
+            strategy: Arc::new(strategy),
+            meter: Meter::default(),
+            ..self.clone()
+        }
+    }
+
     pub fn new(
         alpaca: Arc<AlpacaClient>,
         store: Arc<Store>,
         config: Arc<Config>,
+        strategy: Strategy,
     ) -> (Self, tokio::sync::mpsc::UnboundedReceiver<AgentEvent>) {
         let (events, receiver) = tokio::sync::mpsc::unbounded_channel();
         let jev = config
@@ -360,6 +385,7 @@ impl AgentCtx {
                 _ => None,
             },
             meter: Meter::default(),
+            strategy: Arc::new(strategy),
         };
         if ctx.config.jev.enabled && ctx.jev.is_none() {
             ctx.status("Jev shadow scoring disabled: set JEV_API_KEY");
@@ -424,6 +450,7 @@ pub(crate) mod test_support {
             Arc::new(AlpacaClient::from_env().unwrap()),
             Arc::new(Store::open(&dir).unwrap()),
             Arc::new(Config::default()),
+            Strategy::new("Test", 100_000.0),
         );
         crate::runtime::RUNTIME.spawn(async move {
             while let Some(event) = events.recv().await {

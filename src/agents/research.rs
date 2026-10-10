@@ -146,8 +146,8 @@ pub struct ResearchReport {
 }
 
 const PREAMBLE: &str = "\
-You are the research analyst for Warren, an autonomous swing-trading system \
-(holding periods of days to a few weeks, US equities, long-biased). You write \
+You are the research analyst for one of Warren's autonomous trading agents \
+(US equities, long-biased; its holding period and universe are below). You write \
 one in-depth report on one stock. An executor agent will size and place real \
 (paper) trades from your rating, conviction, entry range, target, and stop, \
 so be calibrated and specific.
@@ -352,8 +352,8 @@ mod live_tests {
 
 #[cfg(test)]
 mod batch {
-    /// Research `WARREN_SYMBOLS` (comma-separated) in parallel into the real
-    /// store, as a cycle would. Costs API tokens; run with
+    /// Research `WARREN_SYMBOLS` (comma-separated) in parallel into a real
+    /// agent's store, as a cycle would. Costs API tokens; run with
     /// `WARREN_SYMBOLS=AAPL,MSFT cargo test research_batch -- --ignored --nocapture`.
     #[test]
     #[ignore]
@@ -361,10 +361,26 @@ mod batch {
         use std::sync::Arc;
         dotenvy::dotenv().ok();
         let symbols = std::env::var("WARREN_SYMBOLS").expect("set WARREN_SYMBOLS");
+        // The agent `WARREN_AGENT` names, or the first.
+        let root = crate::store::Store::default_dir().unwrap();
+        let strategies = crate::strategy::Strategies::new(&root);
+        let list = strategies.list().unwrap();
+        let strategy = match std::env::var("WARREN_AGENT") {
+            Ok(id) => list
+                .into_iter()
+                .find(|s| s.id == id)
+                .expect("no such agent"),
+            Err(_) => list
+                .into_iter()
+                .next()
+                .expect("no agents; launch Warren first"),
+        };
+        let global = crate::config::Config::load_or_create().unwrap();
         let (ctx, _events) = crate::agents::AgentCtx::new(
             Arc::new(crate::market::alpaca::AlpacaClient::from_env().unwrap()),
-            Arc::new(crate::store::Store::open_default().unwrap()),
-            Arc::new(crate::config::Config::load_or_create().unwrap()),
+            Arc::new(crate::store::Store::open(strategies.dir(&strategy.id)).unwrap()),
+            Arc::new(strategy.config(&global)),
+            strategy,
         );
         let runs = symbols.split(',').map(|s| super::run(&ctx, s));
         let results = crate::runtime::RUNTIME.block_on(futures::future::join_all(runs));

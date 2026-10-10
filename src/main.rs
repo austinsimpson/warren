@@ -9,6 +9,7 @@ mod runtime;
 mod scorecard;
 mod scorecard_ui;
 mod store;
+mod strategy;
 mod theme;
 
 use std::{collections::HashMap, sync::Arc, time::Duration};
@@ -45,7 +46,10 @@ struct Warren {
     /// Bumped per chart request so a slow, superseded response is dropped.
     chart_generation: u64,
     portfolio: Portfolio,
-    agents: Option<AgentsState>,
+    /// One runtime per user-created agent (strategy).
+    agents: Vec<AgentsState>,
+    /// Index into `agents` of the agent the UI shows.
+    selected_agent: usize,
     agents_error: Option<SharedString>,
     bottom_tab: scorecard_ui::BottomTab,
     scorecard: scorecard_ui::ScorecardState,
@@ -58,9 +62,15 @@ impl Warren {
             Err(err) => (None, format!("Market data unavailable: {err:#}").into()),
         };
         let (agents, agents_error) = match alpaca.clone().map(|a| autopilot_ui::start(a, cx)) {
-            Some(Ok(agents)) => (Some(agents), None),
-            Some(Err(err)) => (None, Some(format!("Autopilot unavailable: {err:#}").into())),
-            None => (None, Some("Autopilot needs Alpaca credentials".into())),
+            Some(Ok(agents)) => (agents, None),
+            Some(Err(err)) => (
+                Vec::new(),
+                Some(format!("Autopilot unavailable: {err:#}").into()),
+            ),
+            None => (
+                Vec::new(),
+                Some("Autopilot needs Alpaca credentials".into()),
+            ),
         };
         let mut this = Self {
             alpaca,
@@ -74,6 +84,7 @@ impl Warren {
             chart_generation: 0,
             portfolio: Portfolio::default(),
             agents,
+            selected_agent: 0,
             agents_error,
             bottom_tab: Default::default(),
             scorecard: Default::default(),
@@ -461,7 +472,7 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let command = match args.first().map(String::as_str) {
         Some("backtest") => Some(backtest::run_cli(&args[1..])),
-        Some("scorecard") => Some(scorecard::run_cli()),
+        Some("scorecard") => Some(scorecard::run_cli(&args[1..])),
         _ => None,
     };
     if let Some(result) = command {

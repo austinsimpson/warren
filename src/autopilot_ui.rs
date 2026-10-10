@@ -18,6 +18,7 @@ use crate::agents::{
 use crate::config::Config;
 use crate::market::alpaca::AlpacaClient;
 use crate::store::Store;
+use crate::strategy::{Strategies, Strategy};
 use crate::theme::*;
 use crate::{Warren, runtime};
 
@@ -25,7 +26,7 @@ use crate::{Warren, runtime};
 const MAX_EVENTS: usize = 300;
 
 pub struct AgentsState {
-    ctx: AgentCtx,
+    pub ctx: AgentCtx,
     control: Arc<Control>,
     events: VecDeque<AgentEvent>,
     pub reports: HashMap<String, ResearchReport>,
@@ -73,15 +74,42 @@ impl AgentsState {
     }
 }
 
-/// Load config and the store, start the autopilot on the tokio runtime, and
-/// pump its events into the view.
-pub fn start(alpaca: Arc<AlpacaClient>, cx: &mut Context<Warren>) -> anyhow::Result<AgentsState> {
-    let config = Arc::new(Config::load_or_create()?);
-    let store = Arc::new(Store::open_default()?);
-    let (ctx, mut events) = AgentCtx::new(alpaca, store, config);
-    let autopilot = Autopilot::new(ctx.clone());
-    let control = autopilot.control();
-    runtime::RUNTIME.spawn(autopilot.run());
+/// Load the user's agents (moving pre-agent data into a "Default" one, or
+/// creating it on first run), start each one's autopilot on the tokio
+/// runtime, and pump their events into the view.
+pub fn start(
+    alpaca: Arc<AlpacaClient>,
+    cx: &mut Context<Warren>,
+) -> anyhow::Result<Vec<AgentsState>> {
+    let global = Config::load_or_create()?;
+    let data_root = Store::default_dir()?;
+    let strategies = Strategies::new(&data_root);
+    strategies.migrate_legacy(&data_root, &global)?;
+    let mut list = strategies.list()?;
+    if list.is_empty() {
+        let default = Strategy::new("Default", 100_000.0);
+        strategies.save(&default)?;
+        list.push(default);
+    }
+
+    let mut events = None;
+    let mut base: Option<AgentCtx> = None;
+    let mut states = Vec::new();
+    for strategy in list {
+        let store = Arc::new(Store::open(strategies.dir(&strategy.id))?);
+        let config = Arc::new(strategy.config(&global));
+        let ctx = match &base {
+            Some(base) => base.for_strategy(strategy, store, config),
+            None => {
+                let (ctx, receiver) = AgentCtx::new(alpaca.clone(), store, config, strategy);
+                events = Some(receiver);
+                base = Some(ctx.clone());
+                ctx
+            }
+        };
+        states.push(AgentsState::start(ctx));
+    }
+    let mut events = events.expect("at least one strategy");
 
     cx.spawn(async move |this, cx| {
         while let Some(event) = events.recv().await {
@@ -95,40 +123,60 @@ pub fn start(alpaca: Arc<AlpacaClient>, cx: &mut Context<Warren>) -> anyhow::Res
     })
     .detach();
 
-    let mut state = AgentsState {
-        ctx,
-        control,
-        events: VecDeque::new(),
-        reports: HashMap::new(),
-        candidates: None,
-        history: HashMap::new(),
-        runs_today: 0,
-        usage: Default::default(),
-        running: Vec::new(),
-        status: "Starting…".into(),
-    };
-    state.reload();
-    // Seed the feed with recent history, newest first.
-    if let Ok(runs) = state.ctx.store.recent_runs(30) {
-        state.events = runs
-            .into_iter()
-            .map(|run| AgentEvent {
-                at: run.finished_at,
-                agent: Some(run.agent),
-                subject: run.subject,
-                kind: EventKind::RunFinished {
-                    ok: run.ok,
-                    summary: run.summary,
-                },
-            })
-            .collect();
+    Ok(states)
+}
+
+impl AgentsState {
+    /// Spawn `ctx`'s autopilot and load its state.
+    fn start(ctx: AgentCtx) -> Self {
+        let autopilot = Autopilot::new(ctx.clone());
+        let control = autopilot.control();
+        runtime::RUNTIME.spawn(autopilot.run());
+        let mut state = AgentsState {
+            ctx,
+            control,
+            events: VecDeque::new(),
+            reports: HashMap::new(),
+            candidates: None,
+            history: HashMap::new(),
+            runs_today: 0,
+            usage: Default::default(),
+            running: Vec::new(),
+            status: "Starting…".into(),
+        };
+        state.reload();
+        // Seed the feed with recent history, newest first.
+        if let Ok(runs) = state.ctx.store.recent_runs(30) {
+            state.events = runs
+                .into_iter()
+                .map(|run| AgentEvent {
+                    at: run.finished_at,
+                    strategy: state.ctx.strategy.id.clone(),
+                    agent: Some(run.agent),
+                    subject: run.subject,
+                    kind: EventKind::RunFinished {
+                        ok: run.ok,
+                        summary: run.summary,
+                    },
+                })
+                .collect();
+        }
+        state
     }
-    Ok(state)
 }
 
 impl Warren {
+    /// The runtime of the agent the UI shows.
+    pub fn agent(&self) -> Option<&AgentsState> {
+        self.agents.get(self.selected_agent)
+    }
+
     fn on_agent_event(&mut self, event: AgentEvent, cx: &mut Context<Self>) {
-        let Some(agents) = self.agents.as_mut() else {
+        let Some(agents) = self
+            .agents
+            .iter_mut()
+            .find(|a| a.ctx.strategy.id == event.strategy)
+        else {
             return;
         };
         match &event.kind {
@@ -159,14 +207,14 @@ impl Warren {
     }
 
     fn toggle_autopilot(&mut self, cx: &mut Context<Self>) {
-        if let Some(agents) = &self.agents {
+        if let Some(agents) = self.agent() {
             Autopilot::set_paused(&agents.ctx, &agents.control, !agents.paused());
             cx.notify();
         }
     }
 
     fn run_cycle_now(&mut self, cx: &mut Context<Self>) {
-        if let Some(agents) = &self.agents {
+        if let Some(agents) = self.agent() {
             if agents.paused() {
                 Autopilot::set_paused(&agents.ctx, &agents.control, false);
             }
@@ -177,7 +225,7 @@ impl Warren {
 
     /// Run/pause switch, run-now, and the daily run budget.
     pub fn render_autopilot_controls(&self, cx: &mut Context<Self>) -> Div {
-        let Some(agents) = &self.agents else {
+        let Some(agents) = self.agent() else {
             return div().text_size(px(TEXT_XS)).text_color(rgb(RED)).child(
                 self.agents_error
                     .clone()
@@ -231,7 +279,7 @@ impl Warren {
 
     /// What the agents are doing now, or the scheduler's last status.
     pub fn render_activity_status(&self) -> Option<Div> {
-        self.agents.as_ref().map(|agents| {
+        self.agent().map(|agents| {
             let running: Vec<String> = agents
                 .running
                 .iter()
@@ -257,8 +305,8 @@ impl Warren {
     /// Live feed of agent activity, newest first.
     pub fn render_activity(&self) -> impl IntoElement {
         let lines: Vec<Div> = self
-            .agents
-            .iter()
+            .agent()
+            .into_iter()
             .flat_map(|agents| agents.events.iter().take(80))
             .map(activity_line)
             .collect();
@@ -276,7 +324,7 @@ impl Warren {
 
     /// Rating, conviction, levels, and thesis for the selected symbol.
     pub fn render_research_card(&self) -> Option<Div> {
-        let agents = self.agents.as_ref()?;
+        let agents = self.agent()?;
         let report = agents.reports.get(&self.selected)?;
         let f = &report.findings;
         let color = rating_color(report.rating);
@@ -439,7 +487,7 @@ impl Warren {
     /// Conviction across every report on the selected symbol, with the change
     /// since the first and the buy threshold for reference.
     fn render_conviction_history(&self) -> Option<Div> {
-        let agents = self.agents.as_ref()?;
+        let agents = self.agent()?;
         let history = agents.history.get(&self.selected)?;
         let (first, last) = (history.first()?, history.last()?);
         let change = last.1 - first.1;
@@ -498,8 +546,7 @@ impl Warren {
 
     /// Target and stop for the selected symbol, to mark on the chart.
     pub fn research_levels(&self) -> (Option<f64>, Option<f64>) {
-        self.agents
-            .as_ref()
+        self.agent()
             .and_then(|agents| agents.reports.get(&self.selected))
             .map_or((None, None), |r| {
                 (r.findings.target_price, r.findings.stop_loss)
@@ -508,8 +555,7 @@ impl Warren {
 
     /// Candidate symbols from the latest exploration, by priority.
     pub fn candidate_symbols(&self) -> Vec<String> {
-        self.agents
-            .as_ref()
+        self.agent()
             .and_then(|agents| agents.candidates.as_ref())
             .map(|list| list.candidates.iter().map(|c| c.symbol.clone()).collect())
             .unwrap_or_default()

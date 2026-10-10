@@ -10,7 +10,7 @@ use rig_core::schemars::{self, JsonSchema};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use super::{AgentCtx, executor, research::TrendHealth, technicals};
+use super::{AgentCtx, book::Book, executor, research::TrendHealth, technicals};
 use crate::market::alpaca::{NewOrder, OrderSide, Timeframe};
 use crate::store::JournalEntry;
 
@@ -301,6 +301,7 @@ impl ScreenMarket {
         let top = args.top.clamp(1, 50);
         let alpaca = &self.0.alpaca;
         let min_price = self.0.config.exploration.min_price;
+        let universe = &self.0.strategy.universe;
         let (actives, movers) =
             tokio::try_join!(alpaca.most_actives(top), alpaca.movers(top)).map_err(failed)?;
 
@@ -310,6 +311,9 @@ impl ScreenMarket {
         let actives: Vec<Value> = actives
             .iter()
             .filter_map(|a| {
+                if universe.excludes(&a.symbol) {
+                    return None;
+                }
                 let snapshot = prices.get(&a.symbol)?;
                 let price = snapshot.last_price()?;
                 (price >= min_price).then(|| {
@@ -325,7 +329,7 @@ impl ScreenMarket {
             .collect();
         let movers_above = |list: &[crate::market::alpaca::Mover]| -> Vec<Value> {
             list.iter()
-                .filter(|m| m.price >= min_price)
+                .filter(|m| m.price >= min_price && !universe.excludes(&m.symbol))
                 .map(|m| json!({ "symbol": m.symbol, "price": m.price, "change_percent": round2(m.percent_change) }))
                 .collect()
         };
@@ -416,32 +420,30 @@ tool!(
 
 impl GetPortfolio {
     async fn run(&self, _: NoArgs) -> ToolResult {
-        let alpaca = &self.0.alpaca;
-        let (account, positions, orders, clock) = tokio::try_join!(
-            alpaca.account(),
-            alpaca.positions(),
-            alpaca.recent_orders(50),
-            alpaca.clock(),
-        )
-        .map_err(failed)?;
-        let positions: Vec<Value> = positions
+        let ctx = &self.0;
+        let (book, clock) =
+            tokio::try_join!(Book::load(&ctx.alpaca, &ctx.strategy), ctx.alpaca.clock(),)
+                .map_err(failed)?;
+        let equity = book.equity();
+        let positions: Vec<Value> = book
+            .positions
             .iter()
-            .map(|p| {
+            .map(|h| {
                 json!({
-                    "symbol": p.symbol,
-                    "qty": p.qty,
-                    "avg_entry_price": p.avg_entry_price,
-                    "current_price": p.current_price,
-                    "market_value": p.market_value,
-                    "unrealized_pl": p.unrealized_pl,
-                    "unrealized_pl_percent": p.unrealized_plpc.map(|f| round2(f * 100.0)),
-                    "percent_of_equity": p.market_value.map(|v| round2(v / account.equity * 100.0)),
+                    "symbol": h.symbol,
+                    "qty": h.qty,
+                    "avg_cost": round2(h.avg_cost),
+                    "current_price": h.price,
+                    "market_value": round2(h.market_value()),
+                    "unrealized_pl": round2(h.unrealized_pl()),
+                    "unrealized_pl_percent": round2(h.unrealized_pl() / (h.qty * h.avg_cost) * 100.0),
+                    "percent_of_equity": round2(h.market_value() / equity * 100.0),
                 })
             })
             .collect();
-        let open_orders: Vec<Value> = orders
+        let open_orders: Vec<Value> = book
+            .open_orders
             .iter()
-            .filter(|o| o.is_open())
             .map(|o| {
                 json!({
                     "order_id": o.id,
@@ -459,16 +461,19 @@ impl GetPortfolio {
             "market_open": clock.is_open,
             "next_open": clock.next_open,
             "next_close": clock.next_close,
-            "account": {
-                "equity": account.equity,
-                "cash": account.cash,
-                "buying_power": account.buying_power,
-                "day_change": round2(account.day_change()),
-                "day_change_percent": account.day_change_percent().map(round2),
-                "trading_blocked": account.trading_blocked,
+            "book": {
+                "budget": round2(book.budget),
+                "equity": round2(equity),
+                "return_percent": round2((equity / book.budget - 1.0) * 100.0),
+                "cash": round2(book.cash),
+                "cash_available": round2(book.available_cash()),
+                "reserved_for_open_buys": round2(book.reserved),
+                "realized_pl": round2(book.realized_pl),
             },
             "positions": positions,
             "open_orders": open_orders,
+            "note": "This is your own book within a paper account shared with other agents; \
+                     you can only sell shares you bought.",
         }))
     }
 }
@@ -485,7 +490,9 @@ impl GetRiskLimits {
         let limits = &self.0.config.executor;
         let used = orders_today(&self.0).map_err(failed)?;
         Ok(json!({
-            "max_order_notional": limits.max_order_notional,
+            "budget": self.0.strategy.budget,
+            "max_positions": limits.max_positions,
+            "max_order_notional": round2(limits.max_order_notional),
             "max_position_percent_of_equity": limits.max_position_percent,
             "min_cash_percent_of_equity": limits.min_cash_percent,
             "max_orders_per_day": limits.max_orders_per_day,
@@ -563,10 +570,15 @@ impl PlaceOrder {
         }
 
         let alpaca = &ctx.alpaca;
+        if side == OrderSide::Buy && ctx.strategy.universe.excludes(&symbol) {
+            return Err(ToolExecutionError::refused(format!(
+                "{symbol} is on this agent's excluded list"
+            )));
+        }
         let quote_symbols = vec![symbol.clone(), BENCHMARK.to_string()];
-        let (account, positions, snapshots, asset) = tokio::try_join!(
+        let (account, book, snapshots, asset) = tokio::try_join!(
             alpaca.account(),
-            alpaca.positions(),
+            Book::load(alpaca, &ctx.strategy),
             alpaca.snapshots(&quote_symbols),
             alpaca.asset(&symbol),
         )
@@ -592,12 +604,10 @@ impl PlaceOrder {
             qty: args.qty,
             price: args.limit_price.unwrap_or(price),
             tradable: asset.tradable && asset.status == "active",
-            held_qty: positions
-                .iter()
-                .find(|p| p.symbol == symbol)
-                .map_or(0.0, |p| p.qty),
-            equity: account.equity,
-            cash: account.cash,
+            held_qty: book.held(&symbol),
+            equity: book.equity(),
+            cash: book.available_cash(),
+            open_positions: book.positions.len(),
             orders_today: orders_today(ctx).map_err(failed)?,
             limit_price: args.limit_price,
             last_price: price,
@@ -610,11 +620,20 @@ impl PlaceOrder {
         };
         executor::check_risk(&proposal, &ctx.config.executor)
             .map_err(ToolExecutionError::refused)?;
+        // Agents' budgets can add up to more than the account holds.
+        let notional = proposal.price * args.qty as f64;
+        if side == OrderSide::Buy && notional > account.cash {
+            return Err(ToolExecutionError::refused(format!(
+                "the shared paper account has only ${:.2} cash left across all agents",
+                account.cash
+            )));
+        }
 
         let new_order = match args.limit_price {
             Some(limit) => NewOrder::limit(&symbol, side, args.qty, limit),
             None => NewOrder::market(&symbol, side, args.qty),
-        };
+        }
+        .with_client_order_id(ctx.strategy.new_order_id());
         let order = alpaca.submit_order(&new_order).await.map_err(failed)?;
 
         let entry = JournalEntry {
@@ -666,8 +685,17 @@ tool!(
 
 impl CancelOrder {
     async fn run(&self, args: CancelOrderArgs) -> ToolResult {
-        self.0
-            .alpaca
+        let ctx = &self.0;
+        let order = ctx.alpaca.order(&args.order_id).await.map_err(failed)?;
+        if !order
+            .client_order_id
+            .starts_with(&ctx.strategy.order_prefix())
+        {
+            return Err(ToolExecutionError::refused(
+                "that order belongs to another agent",
+            ));
+        }
+        ctx.alpaca
             .cancel_order(&args.order_id)
             .await
             .map_err(failed)?;

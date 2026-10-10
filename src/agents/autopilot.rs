@@ -13,7 +13,7 @@ use anyhow::Result;
 use chrono::{Local, Utc};
 use tokio::sync::Notify;
 
-use super::{AgentCtx, AgentKind, executor, exploration, research};
+use super::{AgentCtx, AgentKind, book::Book, executor, exploration, research};
 
 /// Shared between the loop and the UI.
 pub struct Control {
@@ -174,12 +174,11 @@ impl Autopilot {
         let schedule = &ctx.config.schedule;
         let stale_after = chrono::Duration::hours(schedule.research_stale_after_hours as i64);
 
-        let holdings: Vec<String> = ctx
-            .alpaca
-            .positions()
+        let holdings: Vec<String> = Book::load(&ctx.alpaca, &ctx.strategy)
             .await?
+            .positions
             .into_iter()
-            .map(|p| p.symbol)
+            .map(|h| h.symbol)
             .collect();
         let candidates = ctx
             .store

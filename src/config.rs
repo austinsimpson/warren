@@ -71,7 +71,7 @@ impl Default for Schedule {
 }
 
 /// Model and turn budget, shared by every agent.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AgentModel {
     pub model: String,
@@ -145,6 +145,8 @@ pub struct ExecutorConfig {
     /// Refuse buys whose 12-1 month return is below this. The bottom fifth
     /// (about −22% or worse) kept lagging in backtests.
     pub min_return_12_1_percent: f64,
+    /// Open positions allowed at once.
+    pub max_positions: usize,
 }
 
 impl Default for ExecutorConfig {
@@ -159,6 +161,7 @@ impl Default for ExecutorConfig {
             min_conviction_to_buy: 0.6,
             max_percent_below_52w_high: 45.0,
             min_return_12_1_percent: -20.0,
+            max_positions: 10,
         }
     }
 }

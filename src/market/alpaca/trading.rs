@@ -33,6 +33,30 @@ impl AlpacaClient {
         send_json(request).await
     }
 
+    /// Every order of any status submitted after `after`, oldest first.
+    pub async fn orders_after(&self, after: DateTime<Utc>) -> Result<Vec<Order>> {
+        let mut orders: Vec<Order> = Vec::new();
+        let mut after = after;
+        loop {
+            let request = self
+                .trading_request(Method::GET, "/v2/orders")
+                .query(&[("status", "all"), ("direction", "asc"), ("limit", "500")])
+                .query(&[(
+                    "after",
+                    after.to_rfc3339_opts(chrono::SecondsFormat::Micros, true),
+                )]);
+            let page: Vec<Order> = send_json(request).await?;
+            let full = page.len() == 500;
+            if let Some(last) = page.last() {
+                after = last.created_at;
+            }
+            orders.extend(page);
+            if !full {
+                return Ok(orders);
+            }
+        }
+    }
+
     pub async fn submit_order(&self, order: &NewOrder) -> Result<Order> {
         send_json(self.trading_request(Method::POST, "/v2/orders").json(order)).await
     }
@@ -198,6 +222,9 @@ pub enum TimeInForce {
 #[derive(Debug, Clone, Deserialize)]
 pub struct Order {
     pub id: String,
+    /// Our own ID, which tags the agent that placed the order.
+    #[serde(default)]
+    pub client_order_id: String,
     pub symbol: String,
     /// Absent for notional (dollar-amount) orders.
     #[serde(deserialize_with = "string_number::option_f64")]
@@ -238,6 +265,8 @@ pub struct NewOrder {
     pub time_in_force: TimeInForce,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub limit_price: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_order_id: Option<String>,
 }
 
 impl NewOrder {
@@ -250,6 +279,7 @@ impl NewOrder {
             order_type: OrderType::Market,
             time_in_force: TimeInForce::Day,
             limit_price: None,
+            client_order_id: None,
         }
     }
 
@@ -260,6 +290,12 @@ impl NewOrder {
             limit_price: Some(format!("{limit_price:.2}")),
             ..Self::market(symbol, side, qty)
         }
+    }
+
+    /// Set our own ID for the order (at most 128 characters).
+    pub fn with_client_order_id(mut self, id: String) -> Self {
+        self.client_order_id = Some(id);
+        self
     }
 }
 

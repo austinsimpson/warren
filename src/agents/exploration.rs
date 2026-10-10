@@ -41,8 +41,8 @@ fn preamble(ctx: &AgentCtx) -> String {
     let config = &ctx.config.exploration;
     format!(
         "\
-You are the exploration analyst for Warren, an autonomous swing-trading system \
-(holding periods of days to a few weeks, US equities, long-biased). Your job is \
+You are the exploration analyst for one of Warren's autonomous trading agents \
+(US equities, long-biased; its holding period and universe are below). Your job is \
 to find the best few stocks for a research analyst to study in depth today. You \
 do not trade.
 

@@ -98,11 +98,12 @@ pub struct RunRecord {
 const MAX_LESSONS: usize = 30;
 
 impl Store {
-    pub fn open_default() -> Result<Self> {
-        let dir = dirs::data_dir()
+    /// `<data dir>/warren`, where app-wide data and every strategy's
+    /// directory live.
+    pub fn default_dir() -> Result<PathBuf> {
+        Ok(dirs::data_dir()
             .context("no data directory on this platform")?
-            .join("warren");
-        Self::open(dir)
+            .join("warren"))
     }
 
     pub fn open(dir: impl Into<PathBuf>) -> Result<Self> {

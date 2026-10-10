@@ -14,10 +14,12 @@ use std::collections::{HashMap, HashSet};
 use anyhow::{Context as _, Result};
 use chrono::{DateTime, Duration, Local, NaiveDate, Utc};
 
+use crate::agents::book::Book;
 use crate::agents::{AgentKind, model_cost, research::ResearchReport, tools::BENCHMARK};
 use crate::config::Config;
 use crate::market::alpaca::{AlpacaClient, Bar, OrderSide};
 use crate::store::{JournalEntry, RunRecord, Store};
+use crate::strategy::{Strategies, Strategy};
 
 /// Trading days after a report at which its factors are checked.
 pub const HORIZONS: [usize; 3] = [5, 10, 21];
@@ -452,7 +454,11 @@ pub struct Scorecard {
 }
 
 /// Everything except usage, which is local and cheap; see [`usage`].
-pub async fn compute(alpaca: &AlpacaClient, store: &Store) -> Result<Scorecard> {
+pub async fn compute(
+    alpaca: &AlpacaClient,
+    store: &Store,
+    strategy: &Strategy,
+) -> Result<Scorecard> {
     let now = Utc::now();
     let journal = store.journal()?;
     let reports = store.all_report_history()?;
@@ -491,7 +497,8 @@ pub async fn compute(alpaca: &AlpacaClient, store: &Store) -> Result<Scorecard> 
             .into_iter()
             .filter_map(|(symbol, snap)| Some((symbol, snap.last_price()?)))
             .collect();
-        let performance = performance(alpaca, &journal[0], &spy, &prices).await?;
+        let book = Book::load(alpaca, strategy).await?;
+        let performance = performance(&journal[0], &book, &spy, &prices);
         (performance, decisions(&journal, &fills, &prices))
     };
 
@@ -504,49 +511,46 @@ pub async fn compute(alpaca: &AlpacaClient, store: &Store) -> Result<Scorecard> 
 }
 
 /// From the close before the first decision to now.
-async fn performance(
-    alpaca: &AlpacaClient,
+/// The strategy's book against SPY, from the close before its first
+/// decision to now.
+fn performance(
     first: &JournalEntry,
+    book: &Book,
     spy: &[Bar],
     prices: &HashMap<String, f64>,
-) -> Result<Option<Performance>> {
-    let equity = alpaca
-        .equity_history(first.decided_at - Duration::days(10))
-        .await?;
+) -> Option<Performance> {
     let decided = first.decided_at.date_naive();
-    let Some(&(base_at, base)) = equity
+    let spy_base = spy
         .iter()
         .rev()
-        .find(|(at, _)| at.date_naive() < decided)
-        .or(equity.first())
-    else {
-        return Ok(None);
-    };
-    let Some(spy_base) = spy
-        .iter()
-        .rev()
-        .find(|b| b.timestamp.date_naive() <= base_at.date_naive())
-    else {
-        return Ok(None);
-    };
-    let account = alpaca.account().await.context("fetching account")?;
-    let Some(spy_now) = prices.get(BENCHMARK) else {
-        return Ok(None);
-    };
-    Ok(Some(Performance {
-        since: base_at.date_naive(),
-        warren: account.equity / base - 1.0,
-        spy: spy_now / spy_base.close - 1.0,
-    }))
+        .find(|b| b.timestamp.date_naive() < decided)?;
+    Some(Performance {
+        since: spy_base.timestamp.date_naive(),
+        warren: book.equity() / book.budget - 1.0,
+        spy: prices.get(BENCHMARK)? / spy_base.close - 1.0,
+    })
 }
 
 /// Entry point for `warren scorecard`.
-pub fn run_cli() -> Result<()> {
+pub fn run_cli(args: &[String]) -> Result<()> {
     let config = Config::load_or_create()?;
-    let store = Store::open_default()?;
+    let root = Store::default_dir()?;
+    let strategies = Strategies::new(&root);
+    let list = strategies.list()?;
+    let strategy = match args.first() {
+        Some(id) => list
+            .iter()
+            .find(|s| &s.id == id)
+            .with_context(|| format!("no agent with id {id:?}"))?,
+        None => list
+            .first()
+            .context("no agents yet; launch Warren to create one")?,
+    };
+    let store = Store::open(strategies.dir(&strategy.id))?;
     let alpaca = AlpacaClient::from_env()?;
     let usage = usage(&store.runs()?, &config, Utc::now());
-    let card = crate::runtime::RUNTIME.block_on(compute(&alpaca, &store))?;
+    let card = crate::runtime::RUNTIME.block_on(compute(&alpaca, &store, strategy))?;
+    println!("agent: {} ({})\n", strategy.name, strategy.id);
     print!("{}", render_text(&usage, &card));
     Ok(())
 }

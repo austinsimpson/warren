@@ -23,8 +23,11 @@ pub struct Proposal {
     pub tradable: bool,
     /// Shares currently held; negative when short.
     pub held_qty: f64,
+    /// The strategy's book: equity, and cash not committed to open buys.
     pub equity: f64,
     pub cash: f64,
+    /// Positions the strategy holds now.
+    pub open_positions: usize,
     pub orders_today: usize,
     /// Set for limit orders.
     pub limit_price: Option<f64>,
@@ -85,6 +88,12 @@ pub fn check_risk(p: &Proposal, limits: &ExecutorConfig) -> Result<(), String> {
                 }
                 check_entry(p, research.entry_high)?;
                 check_trend_health(research.trend_health, limits)?;
+            }
+            if p.held_qty <= 0.0 && p.open_positions >= limits.max_positions {
+                return Err(format!(
+                    "already holding {} positions, the most allowed; sell one first",
+                    p.open_positions
+                ));
             }
             let position_after = (p.held_qty.max(0.0) + p.qty as f64) * p.price;
             let max_position = limits.max_position_percent / 100.0 * p.equity;
@@ -178,8 +187,9 @@ fn preamble(ctx: &AgentCtx) -> Result<String> {
     };
     Ok(format!(
         "\
-You are the executor for Warren, an autonomous swing-trading system on an \
-Alpaca paper account (holding periods of days to a few weeks, US equities). \
+You are the executor for one of Warren's autonomous trading agents (US \
+equities; its holding period and universe are below). It trades its own \
+budget within an Alpaca paper account shared with other agents. \
 Research analysts write reports; you decide what to buy, hold, trim, or sell, \
 size the orders, and place them. Nobody reviews your orders before they go \
 out, so be deliberate.
@@ -222,7 +232,7 @@ Hard limits (place_order enforces these and refuses violations):
 
 Context factors: reports also score trend, momentum, and relative strength, \
 but these are left out of conviction. Backtests over 2017–2026 found no edge \
-in them at swing horizons, on large caps or on stocks like the ones \
+in them at horizons of two to four weeks, on large caps or on stocks like the ones \
 exploration screens; among recent big movers, the strongest relative \
 strength did worst. Use them to understand a chart, not as reasons to buy or \
 to size up. Extension (not chasing stretched prices) did hold up.
@@ -288,6 +298,7 @@ mod tests {
             held_qty: 0.0,
             equity: 100_000.0,
             cash: 100_000.0,
+            open_positions: 0,
             orders_today: 0,
             limit_price: Some(price),
             last_price: price,
@@ -307,6 +318,17 @@ mod tests {
             entry_high: Some(1_000.0),
             trend_health: Some(HEALTHY),
         })
+    }
+
+    #[test]
+    fn caps_the_number_of_positions() {
+        let limits = ExecutorConfig::default();
+        let mut p = buy(10, 100.0);
+        p.open_positions = limits.max_positions;
+        assert!(check_risk(&p, &limits).unwrap_err().contains("positions"));
+        // Adding to a position already held is fine.
+        p.held_qty = 5.0;
+        assert!(check_risk(&p, &limits).is_ok());
     }
 
     const HEALTHY: TrendHealth = TrendHealth {
