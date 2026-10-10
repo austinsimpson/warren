@@ -223,7 +223,7 @@ pub async fn run(ctx: &AgentCtx, symbol: &str) -> Result<ResearchReport> {
             .prompt_typed::<ResearchFindings>(format!(
                 "Research {symbol} now ({}) and return your report.\n\n\
                  Computed factors (fixed; do not re-score):\n{}{sector}",
-                Utc::now().format("%Y-%m-%d %H:%M UTC"),
+                ctx.now().format("%Y-%m-%d %H:%M UTC"),
                 describe(&quant),
             ))
             .max_turns(config.max_turns)
@@ -232,17 +232,26 @@ pub async fn run(ctx: &AgentCtx, symbol: &str) -> Result<ResearchReport> {
         let (response, shadow) = tokio::join!(research, shadow_score(ctx, &symbol));
         let response = response.map_err(|err| anyhow!("research on {symbol} failed: {err}"))?;
 
-        let price = ctx
-            .alpaca
-            .snapshots(std::slice::from_ref(&symbol))
-            .await
-            .ok()
-            .and_then(|s| s.get(&symbol).and_then(|s| s.last_price()));
+        let price = match ctx.as_of {
+            // The last close at or before the replayed moment.
+            Some(as_of) => ctx
+                .alpaca
+                .daily_history_until(&symbol, as_of - chrono::Duration::days(10), Some(as_of))
+                .await
+                .ok()
+                .and_then(|bars| bars.last().map(|b| b.close)),
+            None => ctx
+                .alpaca
+                .snapshots(std::slice::from_ref(&symbol))
+                .await
+                .ok()
+                .and_then(|s| s.get(&symbol).and_then(|s| s.last_price())),
+        };
         let findings = response.output;
         let (scored, factors) = scoring::score(&findings, quant, price);
         let report = ResearchReport {
             symbol: symbol.clone(),
-            generated_at: Utc::now(),
+            generated_at: ctx.now(),
             model: config.model.clone(),
             price_at_research: price,
             scoring_version: SCORING_VERSION,
@@ -286,10 +295,10 @@ async fn compute_quant_factors(
     ctx: &AgentCtx,
     symbol: &str,
 ) -> Result<(QuantFactors, TrendHealth)> {
-    let start = Utc::now() - chrono::Duration::days(550);
+    let start = ctx.now() - chrono::Duration::days(550);
     let (stock, benchmark) = tokio::try_join!(
-        ctx.alpaca.daily_history(symbol, start),
-        ctx.alpaca.daily_history(BENCHMARK, start),
+        ctx.alpaca.daily_history_until(symbol, start, ctx.as_of),
+        ctx.alpaca.daily_history_until(BENCHMARK, start, ctx.as_of),
     )?;
     let stock = technicals::compute(&stock).ok_or_else(|| anyhow!("no daily bars for {symbol}"))?;
     let benchmark = technicals::compute(&benchmark);
@@ -304,9 +313,12 @@ async fn compute_quant_factors(
 async fn shadow_score(ctx: &AgentCtx, symbol: &str) -> Option<ShadowScores> {
     let jev = ctx.jev.as_ref()?;
     let result = async {
-        let since = Utc::now() - chrono::Duration::days(14);
-        let news = ctx.alpaca.news(&[symbol.to_string()], since, 50).await?;
-        jev.score(symbol, &news).await
+        let since = ctx.now() - chrono::Duration::days(14);
+        let news = ctx
+            .alpaca
+            .news(&[symbol.to_string()], since, ctx.as_of, 50)
+            .await?;
+        jev.score(symbol, &news, ctx.now()).await
     }
     .await;
     match result {

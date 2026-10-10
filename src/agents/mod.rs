@@ -111,6 +111,9 @@ pub struct AgentCtx {
     pub stop: Arc<AtomicBool>,
     /// Shadow scorer, when enabled and configured.
     pub jev: Option<Arc<jev::JevScorer>>,
+    /// Set when replaying a past moment: every data tool then sees only
+    /// data up to this time. See `replay`.
+    pub as_of: Option<DateTime<Utc>>,
     /// Company sectors from SEC EDGAR; `None` until a contact email is set.
     pub sectors: Option<Arc<SectorDirectory>>,
     /// The user-created agent this context runs for. `config` and `store`
@@ -169,6 +172,11 @@ impl AgentCtx {
             subject: subject.map(str::to_string),
             kind,
         });
+    }
+
+    /// The moment the agent acts at: `as_of` when replaying, else now.
+    pub fn now(&self) -> DateTime<Utc> {
+        self.as_of.unwrap_or_else(Utc::now)
     }
 
     pub fn status(&self, message: impl Into<String>) {
@@ -391,6 +399,7 @@ impl AgentCtx {
             meter: Meter::default(),
             strategy: Arc::new(strategy),
             sectors: None,
+            as_of: None,
         };
         let mut ctx = ctx;
         ctx.sectors = match (

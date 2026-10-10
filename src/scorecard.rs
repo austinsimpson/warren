@@ -307,15 +307,17 @@ fn session_of(bars: &[Bar], at: DateTime<Utc>) -> Option<usize> {
     bars.partition_point(|b| b.timestamp <= at).checked_sub(1)
 }
 
-/// Return of `bars` from session `start`'s close to `days` sessions later,
-/// if that session has closed.
+/// Return of `bars` from the open after session `start` (the first price
+/// anyone acting on a report written during or after that session could
+/// get) to the close `days` sessions after `start`, if that has happened.
 fn forward(bars: &[Bar], start: usize, days: usize, now: DateTime<Utc>) -> Option<f64> {
     let end = bars.get(start + days)?;
-    (end.timestamp + SESSION_END <= now).then(|| end.close / bars[start].close - 1.0)
+    let entry = bars.get(start + 1)?;
+    (end.timestamp + SESSION_END <= now).then(|| end.close / entry.open - 1.0)
 }
 
 /// The study over `reports`, given daily bars for every symbol and SPY.
-fn study(
+pub fn study(
     reports: &[ResearchReport],
     bars: &HashMap<String, Vec<Bar>>,
     spy: &[Bar],
@@ -567,6 +569,39 @@ pub fn tokens(n: u64) -> String {
     }
 }
 
+/// The factor study as a text table.
+pub fn render_factors(f: &FactorStudy) -> String {
+    let mut out = String::new();
+    out += &format!(
+        "\nfactors: {} reports (latest per symbol per day); IC is the rank correlation \
+         with the\nreturn above SPY, spread is high minus low scores. Under {MIN_SAMPLE} \
+         matured reports, read nothing into it.\n",
+        f.reports
+    );
+    if let Some(due) = f.next_maturity {
+        out += &format!("  next report matures around {due}\n");
+    }
+    out += &format!("  {:<14}", "");
+    for h in &f.horizons {
+        out += &format!("{:>22}", format!("{}d (n {})", h.days, h.matured));
+    }
+    out += "\n";
+    for (k, def) in FACTOR_DEFS.iter().enumerate() {
+        out += &format!("  {:<14}", def.name);
+        for h in &f.horizons {
+            let stat = &h.factors[k];
+            let cell = match (stat.ic, stat.spread) {
+                (Some(ic), Some(spread)) => format!("IC {ic:+.2} {}", pct(spread)),
+                (Some(ic), None) => format!("IC {ic:+.2}"),
+                _ => "–".into(),
+            };
+            out += &format!("{cell:>22}");
+        }
+        out += "\n";
+    }
+    out
+}
+
 fn render_text(usage: &Usage, card: &Scorecard) -> String {
     let mut out =
         String::from("usage            runs     input   cached   output      jev      cost\n");
@@ -618,34 +653,7 @@ fn render_text(usage: &Usage, card: &Scorecard) -> String {
         );
     }
 
-    let f = &card.factors;
-    out += &format!(
-        "\nfactors: {} reports (latest per symbol per day); IC is the rank correlation \
-         with the\nreturn above SPY, spread is high minus low scores. Under {MIN_SAMPLE} \
-         matured reports, read nothing into it.\n",
-        f.reports
-    );
-    if let Some(due) = f.next_maturity {
-        out += &format!("  next report matures around {due}\n");
-    }
-    out += &format!("  {:<14}", "");
-    for h in &f.horizons {
-        out += &format!("{:>22}", format!("{}d (n {})", h.days, h.matured));
-    }
-    out += "\n";
-    for (k, def) in FACTOR_DEFS.iter().enumerate() {
-        out += &format!("  {:<14}", def.name);
-        for h in &f.horizons {
-            let stat = &h.factors[k];
-            let cell = match (stat.ic, stat.spread) {
-                (Some(ic), Some(spread)) => format!("IC {ic:+.2} {}", pct(spread)),
-                (Some(ic), None) => format!("IC {ic:+.2}"),
-                _ => "–".into(),
-            };
-            out += &format!("{cell:>22}");
-        }
-        out += "\n";
-    }
+    out += &render_factors(&card.factors);
     out
 }
 

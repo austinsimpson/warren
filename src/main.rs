@@ -7,6 +7,7 @@ mod chart;
 mod config;
 mod market;
 mod portfolio;
+mod replay;
 mod runtime;
 mod scorecard;
 mod scorecard_ui;
@@ -497,6 +498,7 @@ fn main() {
     let command = match args.first().map(String::as_str) {
         Some("backtest") => Some(backtest::run_cli(&args[1..])),
         Some("scorecard") => Some(scorecard::run_cli(&args[1..])),
+        Some("replay") => Some(replay::run_cli(&args[1..])),
         _ => None,
     };
     if let Some(result) = command {

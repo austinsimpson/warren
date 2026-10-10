@@ -45,9 +45,40 @@ impl AlpacaClient {
     /// older than 15 minutes. Use this wherever bars feed indicators, so live
     /// scoring and backtests compute from the same data.
     pub async fn daily_history(&self, symbol: &str, start: DateTime<Utc>) -> Result<Vec<Bar>> {
-        let end = Utc::now() - chrono::Duration::minutes(16);
+        self.daily_history_until(symbol, start, None).await
+    }
+
+    /// [`Self::daily_history`] ending at `end` (at the latest, 16 minutes
+    /// ago), for replaying a past moment.
+    pub async fn daily_history_until(
+        &self,
+        symbol: &str,
+        start: DateTime<Utc>,
+        end: Option<DateTime<Utc>>,
+    ) -> Result<Vec<Bar>> {
+        let latest = Utc::now() - chrono::Duration::minutes(16);
+        let end = end.map_or(latest, |end| end.min(latest));
         self.fetch_bars(symbol, Timeframe::Day, start, Some(end), "sip")
             .await
+    }
+
+    /// Bars ending at `end`, or now when `None`. Past ranges use the SIP
+    /// feed, which the free plan allows for data older than 15 minutes.
+    pub async fn bars_until(
+        &self,
+        symbol: &str,
+        timeframe: Timeframe,
+        start: DateTime<Utc>,
+        end: Option<DateTime<Utc>>,
+    ) -> Result<Vec<Bar>> {
+        match end {
+            Some(end) => {
+                let latest = Utc::now() - chrono::Duration::minutes(16);
+                self.fetch_bars(symbol, timeframe, start, Some(end.min(latest)), "sip")
+                    .await
+            }
+            None => self.bars(symbol, timeframe, start).await,
+        }
     }
 
     /// SIP bars for many symbols at once, through 16 minutes ago, keyed by
@@ -149,10 +180,13 @@ impl AlpacaClient {
 
     /// Recent news for `symbols` since `start`, newest first, without
     /// article bodies.
+    /// `end` bounds the articles, for replaying a past moment; `None` is
+    /// now.
     pub async fn news(
         &self,
         symbols: &[String],
         start: DateTime<Utc>,
+        end: Option<DateTime<Utc>>,
         limit: u32,
     ) -> Result<Vec<NewsArticle>> {
         #[derive(Deserialize)]
@@ -160,7 +194,7 @@ impl AlpacaClient {
             news: Vec<NewsArticle>,
         }
         let start = start.to_rfc3339_opts(SecondsFormat::Secs, true);
-        let request = self
+        let mut request = self
             .data_request(Method::GET, "/v1beta1/news")
             .query(&[
                 ("symbols", symbols.join(",").as_str()),
@@ -169,6 +203,9 @@ impl AlpacaClient {
                 ("include_content", "false"),
             ])
             .query(&[("limit", limit.min(50))]);
+        if let Some(end) = end {
+            request = request.query(&[("end", end.to_rfc3339_opts(SecondsFormat::Secs, true))]);
+        }
         Ok(send_json::<Page>(request).await?.news)
     }
 

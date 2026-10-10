@@ -5,7 +5,7 @@
 //! trusted over the other.
 
 use anyhow::{Context as _, Result};
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use typesafe::{Client, QuestionSet, ScoreAnswer, ScoreKey};
@@ -92,11 +92,16 @@ impl JevScorer {
         })
     }
 
-    /// Score `symbol` from its recent news.
-    pub async fn score(&self, symbol: &str, articles: &[NewsArticle]) -> Result<ShadowScores> {
+    /// Score `symbol` from its recent news as of `as_of`.
+    pub async fn score(
+        &self,
+        symbol: &str,
+        articles: &[NewsArticle],
+        as_of: DateTime<Utc>,
+    ) -> Result<ShadowScores> {
         let state = json!({
             "symbol": symbol,
-            "as_of": Utc::now().format("%Y-%m-%d").to_string(),
+            "as_of": as_of.format("%Y-%m-%d").to_string(),
             "recent_news": articles
                 .iter()
                 .map(|a| json!({
@@ -143,10 +148,11 @@ mod tests {
                     .news(
                         &["AAPL".into()],
                         Utc::now() - chrono::Duration::days(14),
+                        None,
                         30,
                     )
                     .await?;
-                jev.score("AAPL", &news).await
+                jev.score("AAPL", &news, Utc::now()).await
             })
             .unwrap();
         println!("{scores:#?}");

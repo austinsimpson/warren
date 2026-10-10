@@ -229,13 +229,13 @@ pub fn run_cli(args: &[String]) -> Result<()> {
 
 /// Exploration's screen, rebuilt from one day's bars.
 #[derive(Debug, Clone)]
-struct Screen {
-    min_price: f64,
-    min_dollar_volume: f64,
+pub(crate) struct Screen {
+    pub(crate) min_price: f64,
+    pub(crate) min_dollar_volume: f64,
     /// Names taken by that day's share volume, as Alpaca's most-actives.
-    most_active: usize,
+    pub(crate) most_active: usize,
     /// Names taken from each end of that day's percent change.
-    movers: usize,
+    pub(crate) movers: usize,
 }
 
 impl Default for Screen {
@@ -259,7 +259,7 @@ struct ScreenRow {
 
 impl Screen {
     /// The (stock, bar index) pairs the screen picks on `day`.
-    fn select(&self, stocks: &[Series], day: NaiveDate) -> Vec<(usize, usize)> {
+    pub(crate) fn select(&self, stocks: &[Series], day: NaiveDate) -> Vec<(usize, usize)> {
         let mut rows: Vec<ScreenRow> = stocks
             .iter()
             .enumerate()
@@ -324,7 +324,7 @@ fn is_screenable(asset: &crate::market::alpaca::Asset) -> bool {
 /// Daily bars for every listing that was ever liquid enough to pass the
 /// screen. A monthly-bar pass narrows the listings first, so daily history
 /// is fetched only for names that could matter.
-async fn fetch_screened_pool(
+pub(crate) async fn fetch_screened_pool(
     alpaca: &AlpacaClient,
     cache: &BarCache,
     screen: &Screen,
@@ -412,12 +412,12 @@ async fn fetch(alpaca: &AlpacaClient, cache: &BarCache, symbols: Vec<String>) ->
 
 /// Today's daily history per symbol, kept on disk so reruns with other
 /// settings don't refetch it. Earlier days' caches are deleted.
-struct BarCache {
+pub(crate) struct BarCache {
     dir: PathBuf,
 }
 
 impl BarCache {
-    fn today() -> Result<Self> {
+    pub(crate) fn today() -> Result<Self> {
         let root = dirs::cache_dir()
             .context("no cache directory on this platform")?
             .join("warren")
@@ -491,9 +491,9 @@ impl BarCache {
     }
 }
 
-struct Series {
-    symbol: String,
-    bars: Vec<Bar>,
+pub(crate) struct Series {
+    pub(crate) symbol: String,
+    pub(crate) bars: Vec<Bar>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

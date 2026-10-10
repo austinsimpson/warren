@@ -104,6 +104,9 @@ impl GetQuotes {
         if symbols.is_empty() || symbols.len() > 50 {
             return Err(ToolExecutionError::invalid_args("pass 1 to 50 symbols"));
         }
+        if let Some(as_of) = self.0.as_of {
+            return quotes_as_of(&self.0, &symbols, as_of).await;
+        }
         let snapshots = self.0.alpaca.snapshots(&symbols).await.map_err(failed)?;
         let quotes: Vec<Value> = symbols
             .iter()
@@ -144,11 +147,11 @@ tool!(
 impl GetTechnicals {
     async fn run(&self, args: SymbolArgs) -> ToolResult {
         let symbol = args.symbol.trim().to_uppercase();
-        let start = Utc::now() - Duration::days(550);
+        let start = self.0.now() - Duration::days(550);
         let bars = self
             .0
             .alpaca
-            .daily_history(&symbol, start)
+            .daily_history_until(&symbol, start, self.0.as_of)
             .await
             .map_err(failed)?;
         let technicals = technicals::compute(&bars)
@@ -194,7 +197,12 @@ impl GetPriceHistory {
         let bars = self
             .0
             .alpaca
-            .bars(&symbol, timeframe, Utc::now() - Duration::days(days.into()))
+            .bars_until(
+                &symbol,
+                timeframe,
+                self.0.now() - Duration::days(days.into()),
+                self.0.as_of,
+            )
             .await
             .map_err(failed)?;
         let step = bars.len().div_ceil(MAX_HISTORY_ROWS).max(1);
@@ -247,11 +255,11 @@ impl GetNews {
         if symbols.is_empty() || symbols.len() > 20 {
             return Err(ToolExecutionError::invalid_args("pass 1 to 20 symbols"));
         }
-        let start = Utc::now() - Duration::days(args.days.clamp(1, 30).into());
+        let start = self.0.now() - Duration::days(args.days.clamp(1, 30).into());
         let news = self
             .0
             .alpaca
-            .news(&symbols, start, args.limit.clamp(1, 50))
+            .news(&symbols, start, self.0.as_of, args.limit.clamp(1, 50))
             .await
             .map_err(failed)?;
         Ok(json!({ "articles": news }))
@@ -587,6 +595,40 @@ async fn check_universe(ctx: &AgentCtx, symbol: &str) -> Result<(), String> {
             "couldn't look up {symbol}'s sector to check this agent's universe"
         )),
     }
+}
+
+/// Quotes as of a replayed moment, from daily bars: the last session at or
+/// before it. There is no bid or ask in the past.
+async fn quotes_as_of(
+    ctx: &AgentCtx,
+    symbols: &[String],
+    as_of: chrono::DateTime<Utc>,
+) -> ToolResult {
+    let mut quotes = Vec::new();
+    for symbol in symbols {
+        let bars = ctx
+            .alpaca
+            .daily_history_until(symbol, as_of - Duration::days(10), Some(as_of))
+            .await
+            .unwrap_or_default();
+        quotes.push(match bars.as_slice() {
+            [.., prev, last] => json!({
+                "symbol": symbol,
+                "price": last.close,
+                "change_percent": round2((last.close / prev.close - 1.0) * 100.0),
+                "previous_close": prev.close,
+                "day_high": last.high,
+                "day_low": last.low,
+                "day_volume": last.volume,
+                "as_of": last.timestamp,
+            }),
+            _ => json!({ "symbol": symbol, "error": "no data at this date" }),
+        });
+    }
+    Ok(json!({
+        "quotes": quotes,
+        "note": format!("Replaying {}: prices are daily closes.", as_of.format("%Y-%m-%d")),
+    }))
 }
 
 fn orders_today(ctx: &AgentCtx) -> anyhow::Result<usize> {
