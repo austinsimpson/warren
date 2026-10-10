@@ -15,7 +15,6 @@ use super::{
     technicals,
     tools::*,
 };
-use crate::market::alpaca::Timeframe;
 use std::future::IntoFuture;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -221,8 +220,8 @@ pub async fn run(ctx: &AgentCtx, symbol: &str) -> Result<ResearchReport> {
 async fn compute_quant_factors(ctx: &AgentCtx, symbol: &str) -> Result<QuantFactors> {
     let start = Utc::now() - chrono::Duration::days(550);
     let (stock, benchmark) = tokio::try_join!(
-        ctx.alpaca.bars(symbol, Timeframe::Day, start),
-        ctx.alpaca.bars(BENCHMARK, Timeframe::Day, start),
+        ctx.alpaca.daily_history(symbol, start),
+        ctx.alpaca.daily_history(BENCHMARK, start),
     )?;
     let stock = technicals::compute(&stock).ok_or_else(|| anyhow!("no daily bars for {symbol}"))?;
     let benchmark = technicals::compute(&benchmark);

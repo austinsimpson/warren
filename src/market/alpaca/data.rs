@@ -27,13 +27,38 @@ impl AlpacaClient {
         send_json(request).await
     }
 
-    /// Historical bars for `symbol` since `start`, oldest first, following
-    /// pagination.
+    /// Historical bars for `symbol` since `start` from the configured feed,
+    /// oldest first.
     pub async fn bars(
         &self,
         symbol: &str,
         timeframe: Timeframe,
         start: DateTime<Utc>,
+    ) -> Result<Vec<Bar>> {
+        self.fetch_bars(symbol, timeframe, start, None, &self.feed)
+            .await
+    }
+
+    /// Daily bars from the consolidated (SIP) feed, through 16 minutes ago.
+    /// IEX bars only see IEX's sliver of volume, so their highs, lows, and
+    /// volumes misstate ATR and liquidity; the free plan allows SIP data
+    /// older than 15 minutes. Use this wherever bars feed indicators, so live
+    /// scoring and backtests compute from the same data.
+    pub async fn daily_history(&self, symbol: &str, start: DateTime<Utc>) -> Result<Vec<Bar>> {
+        let end = Utc::now() - chrono::Duration::minutes(16);
+        self.fetch_bars(symbol, Timeframe::Day, start, Some(end), "sip")
+            .await
+    }
+
+    /// Bars following pagination. Prices are adjusted for splits and
+    /// dividends, so returns and averages are continuous across them.
+    async fn fetch_bars(
+        &self,
+        symbol: &str,
+        timeframe: Timeframe,
+        start: DateTime<Utc>,
+        end: Option<DateTime<Utc>>,
+        feed: &str,
     ) -> Result<Vec<Bar>> {
         #[derive(Deserialize)]
         struct Page {
@@ -47,15 +72,20 @@ impl AlpacaClient {
         let timeframe = timeframe.to_string();
         let path = format!("/v2/stocks/{symbol}/bars");
         let start = start.to_rfc3339_opts(SecondsFormat::Secs, true);
+        let end = end.map(|end| end.to_rfc3339_opts(SecondsFormat::Secs, true));
         let mut bars = Vec::new();
         let mut page_token: Option<String> = None;
         loop {
             let mut query = vec![
                 ("timeframe", timeframe.as_str()),
                 ("start", start.as_str()),
-                ("feed", &self.feed),
+                ("feed", feed),
+                ("adjustment", "all"),
                 ("limit", "10000"),
             ];
+            if let Some(end) = end.as_deref() {
+                query.push(("end", end));
+            }
             if let Some(token) = page_token.as_deref() {
                 query.push(("page_token", token));
             }
@@ -228,7 +258,7 @@ pub struct Quote {
     pub ask_size: u64,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Bar {
     #[serde(rename = "t")]
     pub timestamp: DateTime<Utc>,

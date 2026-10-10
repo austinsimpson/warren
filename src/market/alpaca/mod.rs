@@ -10,8 +10,10 @@ mod trading;
 pub use data::*;
 pub use trading::*;
 
+use std::time::Duration;
+
 use anyhow::{Context as _, Result, bail};
-use reqwest::{Method, RequestBuilder, Response};
+use reqwest::{Method, RequestBuilder, Response, StatusCode};
 use serde::de::DeserializeOwned;
 
 const DEFAULT_DATA_URL: &str = "https://data.alpaca.markets";
@@ -60,15 +62,31 @@ impl AlpacaClient {
     }
 }
 
+/// Rate-limited requests are retried this many times before giving up.
+const RATE_LIMIT_RETRIES: u32 = 4;
+
 /// Send `request`, failing with Alpaca's error message on a non-2xx reply.
+/// Requests rejected by the rate limit (200 a minute on the free plan) wait
+/// for the limit to reset and try again.
 async fn send(request: RequestBuilder) -> Result<Response> {
     let (client, request) = request.build_split();
     let request = request?;
     let what = format!("{} {}", request.method(), request.url().path());
-    let response = client
-        .execute(request)
-        .await
-        .with_context(|| format!("Alpaca {what} failed"))?;
+    let mut attempt = 0;
+    let response = loop {
+        let this_try = request
+            .try_clone()
+            .context("request body can't be resent")?;
+        let response = client
+            .execute(this_try)
+            .await
+            .with_context(|| format!("Alpaca {what} failed"))?;
+        if response.status() != StatusCode::TOO_MANY_REQUESTS || attempt == RATE_LIMIT_RETRIES {
+            break response;
+        }
+        attempt += 1;
+        tokio::time::sleep(rate_limit_wait(&response, attempt)).await;
+    };
 
     let status = response.status();
     if !status.is_success() {
@@ -76,6 +94,21 @@ async fn send(request: RequestBuilder) -> Result<Response> {
         bail!("Alpaca {what} returned {status}: {body}");
     }
     Ok(response)
+}
+
+/// Until the `X-RateLimit-Reset` time (Unix seconds) if Alpaca sent one,
+/// otherwise a backoff; at most a minute, the limit's window.
+fn rate_limit_wait(response: &Response, attempt: u32) -> Duration {
+    let reset = response
+        .headers()
+        .get("x-ratelimit-reset")
+        .and_then(|v| v.to_str().ok()?.parse::<i64>().ok())
+        .map(|reset| reset - chrono::Utc::now().timestamp() + 1);
+    let seconds = match reset {
+        Some(s) if s > 0 => s as u64,
+        _ => 2u64.pow(attempt),
+    };
+    Duration::from_secs(seconds.min(60))
 }
 
 async fn send_json<T: DeserializeOwned>(request: RequestBuilder) -> Result<T> {

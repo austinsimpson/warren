@@ -1,5 +1,6 @@
 mod agents;
 mod autopilot_ui;
+mod backtest;
 mod chart;
 mod config;
 mod market;
@@ -450,6 +451,15 @@ impl Render for Warren {
 
 fn main() {
     dotenvy::dotenv().ok();
+
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().map(String::as_str) == Some("backtest") {
+        if let Err(err) = backtest::run_cli(&args[1..]) {
+            eprintln!("backtest failed: {err:#}");
+            std::process::exit(1);
+        }
+        return;
+    }
 
     gpui_platform::application().run(|cx: &mut App| {
         if let Err(err) = theme::load_fonts(cx) {

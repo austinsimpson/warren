@@ -148,7 +148,7 @@ impl GetTechnicals {
         let bars = self
             .0
             .alpaca
-            .bars(&symbol, Timeframe::Day, start)
+            .daily_history(&symbol, start)
             .await
             .map_err(failed)?;
         let technicals = technicals::compute(&bars)
