@@ -66,6 +66,84 @@ const THRESHOLDS: [f64; 3] = [0.5, 0.6, 0.7];
 
 const FACTORS: [&str; 4] = ["trend", "momentum", "rel strength", "extension"];
 
+/// Candidate indicators from the literature, measured but not scored. Each
+/// is ranked into quintiles across the names sampled on a date (1 = lowest
+/// value), so no thresholds need choosing. With several candidates, some
+/// will look good by chance: trust one only if both halves of the history
+/// agree.
+const INDICATORS: [Indicator; 5] = [
+    Indicator {
+        name: "1-week return",
+        expect: "short-term reversal: lowest quintile best",
+    },
+    Indicator {
+        name: "near 52-week high",
+        expect: "anchoring: highest quintile (closest to the high) best",
+    },
+    Indicator {
+        name: "12-1 month momentum",
+        expect: "momentum: highest quintile best, over months more than days",
+    },
+    Indicator {
+        name: "relative volume",
+        expect: "attention: unclear sign; high volume often precedes reversal",
+    },
+    Indicator {
+        name: "volatility",
+        expect: "low-volatility anomaly: lowest quintile best risk-adjusted",
+    },
+];
+
+struct Indicator {
+    name: &'static str,
+    expect: &'static str,
+}
+
+/// Raw indicator values at bar `j`, in [`INDICATORS`] order; NaN where the
+/// history is too short.
+fn indicators(bars: &[Bar], j: usize) -> [f64; 5] {
+    let close = |k: usize| j.checked_sub(k).map_or(f64::NAN, |i| bars[i].close);
+    let week = close(0) / close(5) - 1.0;
+    let year = &bars[j.saturating_sub(251)..=j];
+    let near_high = close(0) / year.iter().map(|b| b.high).fold(f64::MIN, f64::max);
+    // Twelve months to one month ago, skipping the reversal-prone last month.
+    let momentum = close(21) / close(252) - 1.0;
+    let relative_volume = match j.checked_sub(20) {
+        Some(from) => {
+            let prior = bars[from..j].iter().map(|b| b.volume as f64).sum::<f64>() / 20.0;
+            bars[j].volume as f64 / prior
+        }
+        None => f64::NAN,
+    };
+    let volatility = match j.checked_sub(63) {
+        Some(from) => {
+            let returns: Vec<f64> = bars[from..=j]
+                .windows(2)
+                .map(|w| (w[1].close / w[0].close).ln())
+                .collect();
+            let m = returns.iter().sum::<f64>() / returns.len() as f64;
+            (returns.iter().map(|r| (r - m).powi(2)).sum::<f64>() / (returns.len() - 1) as f64)
+                .sqrt()
+        }
+        None => f64::NAN,
+    };
+    [week, near_high, momentum, relative_volume, volatility]
+}
+
+/// Quintile (1–5) of each finite value among `values`; 0 for NaN.
+fn quintiles(values: &[f64]) -> Vec<u8> {
+    let mut order: Vec<usize> = (0..values.len())
+        .filter(|&i| values[i].is_finite())
+        .collect();
+    order.sort_by(|&a, &b| values[a].total_cmp(&values[b]));
+    let mut out = vec![0; values.len()];
+    let n = order.len();
+    for (rank, &i) in order.iter().enumerate() {
+        out[i] = (rank * 5 / n.max(1)) as u8 + 1;
+    }
+    out
+}
+
 /// Large caps across sectors, approximately today's S&P 100.
 const UNIVERSE: &[&str] = &[
     "AAPL", "ABBV", "ABT", "ACN", "ADBE", "AIG", "AMD", "AMGN", "AMT", "AMZN", "AVGO", "AXP", "BA",
@@ -211,7 +289,12 @@ impl Screen {
         picked.extend(rows.iter().take(self.most_active).map(|r| (r.stock, r.bar)));
         rows.sort_by(|a, b| b.change.total_cmp(&a.change));
         picked.extend(rows.iter().take(self.movers).map(|r| (r.stock, r.bar)));
-        picked.extend(rows.iter().rev().take(self.movers).map(|r| (r.stock, r.bar)));
+        picked.extend(
+            rows.iter()
+                .rev()
+                .take(self.movers)
+                .map(|r| (r.stock, r.bar)),
+        );
         let mut picked: Vec<_> = picked.into_iter().collect();
         picked.sort();
         picked
@@ -222,7 +305,16 @@ impl Screen {
 /// exchanges, not funds, warrants, units, rights, notes, or preferreds.
 fn is_screenable(asset: &crate::market::alpaca::Asset) -> bool {
     const EXCLUDED: [&str; 10] = [
-        "ETF", "Fund", "Warrant", " Unit", "Right", "Notes", "Preferred", "%", "ETN", "Trust",
+        "ETF",
+        "Fund",
+        "Warrant",
+        " Unit",
+        "Right",
+        "Notes",
+        "Preferred",
+        "%",
+        "ETN",
+        "Trust",
     ];
     asset.tradable
         && matches!(asset.exchange.as_str(), "NYSE" | "NASDAQ" | "AMEX")
@@ -272,7 +364,10 @@ async fn fetch_screened_pool(
             pool
         }
     };
-    eprintln!("{} listings were ever liquid enough; fetching daily bars", pool.len());
+    eprintln!(
+        "{} listings were ever liquid enough; fetching daily bars",
+        pool.len()
+    );
     let bars = cache.history_many(alpaca, &pool).await?;
     let mut stocks: Vec<Series> = bars
         .into_iter()
@@ -420,6 +515,10 @@ struct Observation {
     /// `forward` minus the universe's mean `forward` on the same date; set
     /// once every symbol is observed.
     excess: f64,
+    /// Raw [`INDICATORS`] values, and their quintiles on the date (0 when
+    /// unavailable); quintiles are set once every symbol is observed.
+    indicators: [f64; 5],
+    quintiles: [u8; 5],
 }
 
 fn date(bar: &Bar) -> NaiveDate {
@@ -471,8 +570,14 @@ fn observe_all(
         let today = &mut observations[first..];
         if !today.is_empty() {
             let mean = today.iter().map(|o| o.forward).sum::<f64>() / today.len() as f64;
-            for obs in today {
+            for obs in today.iter_mut() {
                 obs.excess = obs.forward - mean;
+            }
+            for k in 0..INDICATORS.len() {
+                let values: Vec<f64> = today.iter().map(|o| o.indicators[k]).collect();
+                for (obs, q) in today.iter_mut().zip(quintiles(&values)) {
+                    obs.quintiles[k] = q;
+                }
             }
         }
         i += horizon;
@@ -518,6 +623,8 @@ fn observe(
         benchmark_forward,
         bracketed: simulate_trade(ahead, now.atr_14?),
         excess: 0.0,
+        indicators: indicators(bars, j),
+        quintiles: [0; 5],
     })
 }
 
@@ -637,33 +744,42 @@ fn report(observations: &[Observation], universe: &str, horizon: usize) -> Strin
                 out += &bucket_row(&format!("score {score}"), &group);
             }
         }
-        let halves = [
-            ("all", observations.to_vec()),
-            (
-                "first half",
-                observations
-                    .iter()
-                    .filter(|o| o.date < midpoint)
-                    .cloned()
-                    .collect(),
-            ),
-            (
-                "second half",
-                observations
-                    .iter()
-                    .filter(|o| o.date >= midpoint)
-                    .cloned()
-                    .collect(),
-            ),
-        ];
-        let spreads: Vec<String> = halves
-            .iter()
-            .filter_map(|(label, obs)| {
-                let (m, t) = spread(obs, |o| o.scores[k] >= 4, |o| o.scores[k] <= 2)?;
-                Some(format!("{label} {} (t {t:.1})", pct(m)))
-            })
-            .collect();
-        out += &format!("  spread     {}\n", spreads.join(", "));
+        out += &format!(
+            "  spread     {}\n",
+            halves_spread(
+                observations,
+                midpoint,
+                |o| o.scores[k] >= 4,
+                |o| o.scores[k] <= 2
+            )
+        );
+    }
+
+    out += "\ncandidate indicators (quintiles across the names sampled each date; \
+            spread is Q5 minus Q1)\n";
+    for (k, indicator) in INDICATORS.iter().enumerate() {
+        out += &format!(
+            "\n{} — expect {}\n{BUCKET_HEADER}",
+            indicator.name, indicator.expect
+        );
+        for q in 1..=5u8 {
+            let group: Vec<_> = observations
+                .iter()
+                .filter(|o| o.quintiles[k] == q)
+                .collect();
+            if !group.is_empty() {
+                out += &bucket_row(&format!("Q{q}"), &group);
+            }
+        }
+        out += &format!(
+            "  spread     {}\n",
+            halves_spread(
+                observations,
+                midpoint,
+                |o| o.quintiles[k] == 5,
+                |o| o.quintiles[k] == 1
+            )
+        );
     }
 
     out += &format!("\nquant conviction\n{BUCKET_HEADER}");
@@ -758,6 +874,32 @@ fn report(observations: &[Observation], universe: &str, horizon: usize) -> Strin
     );
     out += &format!("{:<17} {}\n", "  SPY", curve_stats(&spy, years, horizon));
     out
+}
+
+/// `spread` over all dates and each half of them.
+fn halves_spread(
+    observations: &[Observation],
+    midpoint: NaiveDate,
+    high: impl Fn(&Observation) -> bool,
+    low: impl Fn(&Observation) -> bool,
+) -> String {
+    [
+        ("all", None),
+        ("first half", Some(true)),
+        ("second half", Some(false)),
+    ]
+    .iter()
+    .filter_map(|(label, first)| {
+        let in_half = |o: &Observation| first.is_none_or(|f| (o.date < midpoint) == f);
+        let (m, t) = spread(
+            observations,
+            |o| in_half(o) && high(o),
+            |o| in_half(o) && low(o),
+        )?;
+        Some(format!("{label} {} (t {t:.1})", pct(m)))
+    })
+    .collect::<Vec<_>>()
+    .join(", ")
 }
 
 /// Observations grouped by sample date, in order.
@@ -857,6 +999,31 @@ mod tests {
     }
 
     #[test]
+    fn quintiles_split_finite_values_evenly() {
+        let values = [5.0, 1.0, f64::NAN, 3.0, 2.0, 4.0, 10.0, 9.0, 8.0, 7.0, 6.0];
+        let q = quintiles(&values);
+        assert_eq!(q[2], 0);
+        assert_eq!(q[1], 1); // lowest
+        assert_eq!(q[6], 5); // highest
+        for bucket in 1..=5 {
+            assert_eq!(q.iter().filter(|&&x| x == bucket).count(), 2);
+        }
+    }
+
+    #[test]
+    fn indicators_use_only_past_bars() {
+        let bars = series(800);
+        let before = indicators(&bars, 700);
+        let mut altered = bars.clone();
+        for b in &mut altered[701..] {
+            b.close *= 2.0;
+            b.volume *= 2;
+        }
+        assert_eq!(before, indicators(&altered, 700));
+        assert!(before.iter().all(|v| v.is_finite()));
+    }
+
+    #[test]
     fn trades_exit_at_stop_target_or_time() {
         let cost = (1.0 - COST) / (1.0 + COST);
         // Target (100 + 3) hit on the second bar.
@@ -910,7 +1077,9 @@ mod tests {
         // Five liquid names with distinct volumes and moves, and one too
         // cheap to qualify.
         let make = |symbol: &str, price: f64, volume: u64, last_change: f64| {
-            let mut bars: Vec<Bar> = (0..30).map(|d| bar(d, price, price, price, price)).collect();
+            let mut bars: Vec<Bar> = (0..30)
+                .map(|d| bar(d, price, price, price, price))
+                .collect();
             for b in &mut bars {
                 b.volume = volume;
             }

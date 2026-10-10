@@ -67,8 +67,8 @@ impl AlpacaClient {
         let symbols = symbols.join(",");
         let timeframe = timeframe.to_string();
         let start = start.to_rfc3339_opts(SecondsFormat::Secs, true);
-        let end = (Utc::now() - chrono::Duration::minutes(16))
-            .to_rfc3339_opts(SecondsFormat::Secs, true);
+        let end =
+            (Utc::now() - chrono::Duration::minutes(16)).to_rfc3339_opts(SecondsFormat::Secs, true);
         let mut bars: HashMap<String, Vec<Bar>> = HashMap::new();
         let mut page_token: Option<String> = None;
         loop {
@@ -84,8 +84,11 @@ impl AlpacaClient {
             if let Some(token) = page_token.as_deref() {
                 query.push(("page_token", token));
             }
-            let page: Page =
-                send_json(self.data_request(Method::GET, "/v2/stocks/bars").query(&query)).await?;
+            let page: Page = send_json(
+                self.data_request(Method::GET, "/v2/stocks/bars")
+                    .query(&query),
+            )
+            .await?;
             for (symbol, page_bars) in page.bars.unwrap_or_default() {
                 bars.entry(symbol).or_default().extend(page_bars);
             }
