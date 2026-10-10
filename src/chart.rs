@@ -7,7 +7,7 @@ use gpui::{
 };
 
 use crate::market::alpaca::{Bar, Timeframe};
-use crate::theme::{BORDER, MUTED, tint};
+use crate::theme::{BORDER, GREEN, MUTED, RED, tint};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChartRange {
@@ -76,9 +76,14 @@ impl ChartRange {
 }
 
 /// A line chart of closing prices: faint gridlines, a dashed baseline at the
-/// first close, a gradient fill, and a marker on the latest price. Fills
-/// whatever space its parent gives it.
-pub fn price_chart(closes: Vec<f64>, color: u32) -> impl IntoElement {
+/// first close, a gradient fill, and a marker on the latest price. The
+/// research target and stop, `levels`, are marked when they fall within the
+/// plotted range. Fills whatever space its parent gives it.
+pub fn price_chart(
+    closes: Vec<f64>,
+    color: u32,
+    levels: (Option<f64>, Option<f64>),
+) -> impl IntoElement {
     canvas(
         |_, _, _| {},
         move |bounds, _, window, _| {
@@ -102,6 +107,20 @@ pub fn price_chart(closes: Vec<f64>, color: u32) -> impl IntoElement {
             baseline.line_to(point(bounds.right(), baseline_y));
             if let Ok(path) = baseline.build() {
                 window.paint_path(path, tint(MUTED, 0.6));
+            }
+
+            let (target, stop) = levels;
+            for (level, level_color) in [(target, GREEN), (stop, RED)] {
+                let Some(level) = level.filter(|l| (plot.min..=plot.max).contains(l)) else {
+                    continue;
+                };
+                let y = plot.y(level);
+                let mut line = PathBuilder::stroke(px(1.)).dash_array(&[px(6.), px(4.)]);
+                line.move_to(point(bounds.left(), y));
+                line.line_to(point(bounds.right(), y));
+                if let Ok(path) = line.build() {
+                    window.paint_path(path, tint(level_color, 0.55));
+                }
             }
 
             let points = &plot.points;

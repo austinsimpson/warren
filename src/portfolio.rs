@@ -45,6 +45,15 @@ struct PendingOrder {
 }
 
 impl Warren {
+    /// Symbols with an open position.
+    pub fn held_symbols(&self) -> Vec<String> {
+        self.portfolio
+            .positions
+            .iter()
+            .map(|p| p.symbol.clone())
+            .collect()
+    }
+
     pub fn refresh_portfolio(&mut self, cx: &mut Context<Self>) {
         let Some(alpaca) = self.alpaca.clone() else {
             return;
@@ -192,9 +201,7 @@ impl Warren {
                         format!("{} {pct}", format_signed_money(account.day_change())),
                     )
                     .text_color(color),
-                )
-                .child(stat("BP", format_money(account.buying_power)))
-                .child(stat("Cash", format_money(account.cash)));
+                );
             if account.trading_blocked {
                 summary = summary.child(div().text_color(rgb(RED)).child("Trading blocked"));
             }
@@ -251,6 +258,7 @@ impl Warren {
             div()
                 .flex()
                 .flex_row()
+                .flex_wrap()
                 .items_center()
                 .gap_2()
                 .child(label("Qty"))
@@ -440,6 +448,25 @@ impl Warren {
             .gap_1()
             .border_l_1()
             .border_color(rgb(BORDER))
+            .children(self.portfolio.account.as_ref().map(|account| {
+                let row = |name: &'static str, value: String| {
+                    div()
+                        .flex()
+                        .flex_row()
+                        .justify_between()
+                        .px_2()
+                        .child(label(name))
+                        .child(value)
+                };
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_0p5()
+                    .pb_2()
+                    .child(div().px_2().pt_1().pb_1().child(label("Account")))
+                    .child(row("Buying power", format_money(account.buying_power)))
+                    .child(row("Cash", format_money(account.cash)))
+            }))
             .child(div().px_2().pt_1().child(label("Positions")))
             .when(positions.is_empty(), |col| col.child(empty("No positions")))
             .children(positions)

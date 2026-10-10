@@ -10,7 +10,7 @@ use std::{collections::HashMap, fmt};
 use anyhow::{Result, bail};
 use chrono::{DateTime, SecondsFormat, Utc};
 use reqwest::Method;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use super::{AlpacaClient, send_json};
 
@@ -67,6 +67,84 @@ impl AlpacaClient {
             }
         }
     }
+
+    /// Recent news for `symbols` since `start`, newest first, without
+    /// article bodies.
+    pub async fn news(
+        &self,
+        symbols: &[String],
+        start: DateTime<Utc>,
+        limit: u32,
+    ) -> Result<Vec<NewsArticle>> {
+        #[derive(Deserialize)]
+        struct Page {
+            news: Vec<NewsArticle>,
+        }
+        let start = start.to_rfc3339_opts(SecondsFormat::Secs, true);
+        let request = self
+            .data_request(Method::GET, "/v1beta1/news")
+            .query(&[
+                ("symbols", symbols.join(",").as_str()),
+                ("start", start.as_str()),
+                ("sort", "desc"),
+                ("include_content", "false"),
+            ])
+            .query(&[("limit", limit.min(50))]);
+        Ok(send_json::<Page>(request).await?.news)
+    }
+
+    /// The most actively traded stocks by volume, today.
+    pub async fn most_actives(&self, top: u32) -> Result<Vec<ActiveStock>> {
+        #[derive(Deserialize)]
+        struct Page {
+            most_actives: Vec<ActiveStock>,
+        }
+        let request = self
+            .data_request(Method::GET, "/v1beta1/screener/stocks/most-actives")
+            .query(&[("by", "volume")])
+            .query(&[("top", top.min(100))]);
+        Ok(send_json::<Page>(request).await?.most_actives)
+    }
+
+    /// Today's top gainers and losers by percent change.
+    pub async fn movers(&self, top: u32) -> Result<Movers> {
+        let request = self
+            .data_request(Method::GET, "/v1beta1/screener/stocks/movers")
+            .query(&[("top", top.min(50))]);
+        send_json(request).await
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NewsArticle {
+    pub headline: String,
+    #[serde(default)]
+    pub summary: String,
+    pub source: String,
+    pub symbols: Vec<String>,
+    pub created_at: DateTime<Utc>,
+    pub url: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ActiveStock {
+    pub symbol: String,
+    pub volume: f64,
+    pub trade_count: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Movers {
+    pub gainers: Vec<Mover>,
+    pub losers: Vec<Mover>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Mover {
+    pub symbol: String,
+    pub price: f64,
+    pub change: f64,
+    pub percent_change: f64,
 }
 
 /// Bar aggregation period. Alpaca accepts 1–59 minutes, 1–23 hours, one day,

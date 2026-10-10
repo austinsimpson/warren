@@ -37,11 +37,49 @@ impl AlpacaClient {
         send_json(self.trading_request(Method::POST, "/v2/orders").json(order)).await
     }
 
+    pub async fn order(&self, order_id: &str) -> Result<Order> {
+        let path = format!("/v2/orders/{order_id}");
+        send_json(self.trading_request(Method::GET, &path)).await
+    }
+
+    /// Whether the market is open now, and the next open and close.
+    pub async fn clock(&self) -> Result<Clock> {
+        send_json(self.trading_request(Method::GET, "/v2/clock")).await
+    }
+
+    /// Tradability details for one symbol.
+    pub async fn asset(&self, symbol: &str) -> Result<Asset> {
+        let path = format!("/v2/assets/{symbol}");
+        send_json(self.trading_request(Method::GET, &path)).await
+    }
+
     pub async fn cancel_order(&self, order_id: &str) -> Result<()> {
         let path = format!("/v2/orders/{order_id}");
         send(self.trading_request(Method::DELETE, &path)).await?;
         Ok(())
     }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct Clock {
+    pub is_open: bool,
+    pub next_open: DateTime<Utc>,
+    pub next_close: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Asset {
+    pub symbol: String,
+    pub name: String,
+    /// e.g. `us_equity`.
+    pub class: String,
+    /// e.g. `NASDAQ`, `NYSE`, `OTC`.
+    pub exchange: String,
+    /// `active` or `inactive`.
+    pub status: String,
+    pub tradable: bool,
+    pub shortable: bool,
+    pub fractionable: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]

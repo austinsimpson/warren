@@ -1,8 +1,11 @@
-mod ai;
+mod agents;
+mod autopilot_ui;
 mod chart;
+mod config;
 mod market;
 mod portfolio;
 mod runtime;
+mod store;
 mod theme;
 
 use std::{collections::HashMap, sync::Arc, time::Duration};
@@ -13,12 +16,14 @@ use gpui::{
     Window, WindowBounds, WindowOptions, div, point, prelude::*, px, rgb, size, transparent_black,
 };
 
+use autopilot_ui::AgentsState;
 use chart::ChartRange;
 use market::alpaca::{AlpacaClient, Bar, Snapshot};
 use portfolio::Portfolio;
 use theme::*;
 
-const DEFAULT_WATCHLIST: &[&str] = &["SPY", "QQQ", "AAPL", "MSFT", "NVDA"];
+/// Always shown at the top of the watchlist for market context.
+const MARKET_SYMBOLS: &[&str] = &["SPY", "QQQ"];
 const REFRESH_INTERVAL: Duration = Duration::from_secs(10);
 /// The header doubles as the (transparent) title bar.
 const HEADER_HEIGHT: f32 = 38.;
@@ -37,7 +42,8 @@ struct Warren {
     /// Bumped per chart request so a slow, superseded response is dropped.
     chart_generation: u64,
     portfolio: Portfolio,
-    claude_status: SharedString,
+    agents: Option<AgentsState>,
+    agents_error: Option<SharedString>,
 }
 
 impl Warren {
@@ -46,11 +52,15 @@ impl Warren {
             Ok(client) => (Some(Arc::new(client)), "Loading…".into()),
             Err(err) => (None, format!("Market data unavailable: {err:#}").into()),
         };
-        let watchlist: Vec<String> = DEFAULT_WATCHLIST.iter().map(|s| s.to_string()).collect();
+        let (agents, agents_error) = match alpaca.clone().map(|a| autopilot_ui::start(a, cx)) {
+            Some(Ok(agents)) => (Some(agents), None),
+            Some(Err(err)) => (None, Some(format!("Autopilot unavailable: {err:#}").into())),
+            None => (None, Some("Autopilot needs Alpaca credentials".into())),
+        };
         let mut this = Self {
             alpaca,
-            selected: watchlist[0].clone(),
-            watchlist,
+            selected: MARKET_SYMBOLS[0].to_string(),
+            watchlist: Vec::new(),
             snapshots: HashMap::new(),
             market_status,
             range: ChartRange::Day,
@@ -58,7 +68,8 @@ impl Warren {
             chart_status: "".into(),
             chart_generation: 0,
             portfolio: Portfolio::default(),
-            claude_status: "".into(),
+            agents,
+            agents_error,
         };
         this.refresh_quotes(cx);
         this.load_chart(cx);
@@ -85,6 +96,11 @@ impl Warren {
         let Some(alpaca) = self.alpaca.clone() else {
             return;
         };
+        self.watchlist = self
+            .watchlist_sections()
+            .into_iter()
+            .flat_map(|(_, symbols)| symbols)
+            .collect();
         let symbols = self.watchlist.clone();
         cx.spawn(async move |this, cx| {
             let result = runtime::run(async move { alpaca.snapshots(&symbols).await }).await;
@@ -156,27 +172,38 @@ impl Warren {
         .detach();
     }
 
-    fn ask_claude(&mut self, cx: &mut Context<Self>) {
-        self.claude_status = "Asking Claude…".into();
-        cx.notify();
-
-        cx.spawn(async move |this, cx| {
-            let status = runtime::run(ai::hello())
-                .await
-                .unwrap_or_else(|err| format!("Error: {err:#}"));
-            this.update(cx, |this, cx| {
-                this.claude_status = status.into();
-                cx.notify();
-            })
-        })
-        .detach();
+    /// Market context, current holdings, then exploration candidates, each
+    /// symbol listed once.
+    fn watchlist_sections(&self) -> Vec<(&'static str, Vec<String>)> {
+        let mut seen = std::collections::HashSet::new();
+        let mut section = |symbols: Vec<String>| -> Vec<String> {
+            symbols
+                .into_iter()
+                .filter(|s| seen.insert(s.clone()))
+                .collect()
+        };
+        vec![
+            (
+                "Market",
+                section(MARKET_SYMBOLS.iter().map(|s| s.to_string()).collect()),
+            ),
+            ("Holdings", section(self.held_symbols())),
+            ("Candidates", section(self.candidate_symbols())),
+        ]
     }
 
-    fn render_watchlist(&self, cx: &mut Context<Self>) -> Div {
-        let rows: Vec<_> = self
-            .watchlist
-            .iter()
-            .map(|symbol| self.render_row(symbol, cx))
+    fn render_watchlist(&self, cx: &mut Context<Self>) -> Stateful<Div> {
+        let sections: Vec<Div> = self
+            .watchlist_sections()
+            .into_iter()
+            .filter(|(_, symbols)| !symbols.is_empty())
+            .map(|(name, symbols)| {
+                div()
+                    .flex()
+                    .flex_col()
+                    .child(div().px_2().pt_2().pb_1().child(label(name)))
+                    .children(symbols.iter().map(|symbol| self.render_row(symbol, cx)))
+            })
             .collect();
 
         div()
@@ -188,8 +215,9 @@ impl Warren {
             .gap_1()
             .border_r_1()
             .border_color(rgb(BORDER))
-            .child(div().px_2().pt_1().child(label("Watchlist")))
-            .child(div().flex().flex_col().children(rows))
+            .id("watchlist")
+            .overflow_y_scroll()
+            .children(sections)
             .when(!self.market_status.is_empty(), |col| {
                 col.child(
                     div()
@@ -313,7 +341,11 @@ impl Warren {
                         .child(format!("H {high:.2}"))
                         .child(format!("L {low:.2}")),
                 )
-                .child(div().flex_1().child(chart::price_chart(closes, line_color)))
+                .child(div().flex_1().child(chart::price_chart(
+                    closes,
+                    line_color,
+                    self.research_levels(),
+                )))
                 .child(
                     axis_text()
                         .justify_between()
@@ -335,6 +367,8 @@ impl Warren {
             .flex()
             .flex_col()
             .flex_1()
+            .min_w_0()
+            .min_h_0()
             .p_3()
             .gap_2()
             .child(
@@ -346,6 +380,7 @@ impl Warren {
                     .child(header)
                     .child(range_buttons),
             )
+            .children(self.render_research_card())
             .child(body)
     }
 }
@@ -371,6 +406,7 @@ impl Render for Warren {
             )
             .child(self.render_account_summary())
             .child(div().flex_1())
+            .child(self.render_autopilot_controls(cx))
             .child(
                 ghost_button("refresh", "Refresh", false).on_click(cx.listener(
                     |this, _, _, cx| {
@@ -387,30 +423,6 @@ impl Render for Warren {
             .min_w_0()
             .child(self.render_chart_panel(cx))
             .child(self.render_order_ticket(cx));
-
-        let footer = div()
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap_3()
-            .h(px(32.))
-            .px_2()
-            .border_t_1()
-            .border_color(rgb(BORDER))
-            .child(
-                ghost_button("ask-claude", "Ask Claude", false)
-                    .on_click(cx.listener(|this, _, _, cx| this.ask_claude(cx))),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .font_family(SANS)
-                    .truncate()
-                    .text_size(px(TEXT_SM))
-                    .text_color(rgb(MUTED))
-                    .child(self.claude_status.clone()),
-            );
 
         div()
             .flex()
@@ -432,7 +444,7 @@ impl Render for Warren {
                     .child(center)
                     .child(self.render_positions_and_orders(cx)),
             )
-            .child(footer)
+            .child(self.render_activity())
     }
 }
 
@@ -447,7 +459,7 @@ fn main() {
         cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
-                window_min_size: Some(size(px(760.), px(480.))),
+                window_min_size: Some(size(px(900.), px(560.))),
                 titlebar: Some(TitlebarOptions {
                     title: Some("Warren".into()),
                     appears_transparent: true,

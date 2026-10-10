@@ -6,11 +6,16 @@ edition = "2024"
 [dependencies]
 anyhow = "1.0.104"
 chrono = { version = "0.4", features = ["serde"] }
+dirs = "6"
 dotenvy = "0.15.7"
+futures = "0.3"
 gpui = { git = "https://github.com/zed-industries/zed", rev = "f16f9652ec57bf806e65b2a0d51bb92a63644914" }
 gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "f16f9652ec57bf806e65b2a0d51bb92a63644914", features = ["font-kit"] }
 reqwest = { version = "0.13", features = ["json", "query"] }
+rig-agent = "0.44"
 rig-core = { version = "0.44", features = ["reqwest"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tokio = { version = "1.53.2", features = ["rt-multi-thread", "macros"] }
+tokio = { version = "1.53.2", features = ["rt-multi-thread", "macros", "time", "sync"] }
+toml = "0.8"
+typesafe-ai-rs = { git = "https://github.com/Data41/typesafe-ai-rs", rev = "2dc059c01431359a697403fb257743310489fe30", version = "0.1.0" }
