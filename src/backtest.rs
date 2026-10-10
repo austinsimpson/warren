@@ -3,7 +3,9 @@
 //! only the bars available that day, then measures what happened next.
 //!
 //! Run with `cargo run --release -- backtest [--horizon DAYS]
-//! [--universe large|screened] [SYMBOL ...]`.
+//! [--universe large|screened|liquid] [--fundamentals] [SYMBOL ...]`.
+//! `--fundamentals` measures growth indicators from SEC filings instead of
+//! price indicators.
 //!
 //! Universes:
 //! - `large` (the default): roughly today's S&P 100, every name on every
@@ -71,7 +73,7 @@ const FACTORS: [&str; 4] = ["trend", "momentum", "rel strength", "extension"];
 /// value), so no thresholds need choosing. With several candidates, some
 /// will look good by chance: trust one only if both halves of the history
 /// agree.
-const INDICATORS: [Indicator; 6] = [
+const PRICE_INDICATORS: [Indicator; 6] = [
     Indicator {
         name: "1-week return",
         expect: "short-term reversal: lowest quintile best",
@@ -98,18 +100,124 @@ const INDICATORS: [Indicator; 6] = [
     },
 ];
 
-/// Index of the composite in [`INDICATORS`]: the sum of the 12-1 momentum
-/// and 52-week-high quintiles and the extension score, set after quintiles.
+/// Index of the composite in [`PRICE_INDICATORS`]: the sum of the 12-1
+/// momentum and 52-week-high quintiles and the extension score, set after
+/// quintiles.
 const COMPOSITE: usize = 5;
 
+/// Growth indicators from SEC fundamentals, with each quarter treated as
+/// public 90 days after it ends (`fundamentals::BACKTEST_LAG_DAYS`).
+const GROWTH_INDICATORS: [Indicator; 8] = [
+    Indicator {
+        name: "revenue growth",
+        expect: "growth: highest quintile best",
+    },
+    Indicator {
+        name: "growth acceleration",
+        expect: "accelerating growth: highest quintile best",
+    },
+    Indicator {
+        name: "gross margin",
+        expect: "quality: highest quintile best",
+    },
+    Indicator {
+        name: "gross margin change",
+        expect: "improving economics: highest quintile best",
+    },
+    Indicator {
+        name: "share growth",
+        expect: "dilution: lowest quintile best",
+    },
+    Indicator {
+        name: "price/sales",
+        expect: "valuation: lowest quintile cheapest; growth names often stay expensive",
+    },
+    Indicator {
+        name: "12-1 month momentum",
+        expect: "momentum: highest quintile best",
+    },
+    Indicator {
+        name: "growth composite",
+        expect: "revenue growth + acceleration + cheapness (price/sales, reversed) + 12-1 \
+                 momentum: highest best",
+    },
+];
+
+/// Which indicators a run measures, and how to compute them.
+pub(crate) struct IndicatorSet<'a> {
+    list: &'static [Indicator],
+    /// Index of the composite, filled in from the other quintiles.
+    composite: usize,
+    /// Each ticker's fundamentals, for the growth set.
+    fundamentals: Option<&'a HashMap<String, crate::fundamentals::Series>>,
+}
+
+impl<'a> IndicatorSet<'a> {
+    pub(crate) fn price() -> Self {
+        Self {
+            list: &PRICE_INDICATORS,
+            composite: COMPOSITE,
+            fundamentals: None,
+        }
+    }
+
+    pub(crate) fn growth(fundamentals: &'a HashMap<String, crate::fundamentals::Series>) -> Self {
+        Self {
+            list: &GROWTH_INDICATORS,
+            composite: 7,
+            fundamentals: Some(fundamentals),
+        }
+    }
+
+    /// Raw values for `symbol` at bar `j`, the composite left NaN.
+    fn raw(&self, symbol: &str, bars: &[Bar], j: usize) -> Vec<f64> {
+        let Some(fundamentals) = self.fundamentals else {
+            return price_indicators(bars, j).to_vec();
+        };
+        let nan = vec![f64::NAN; self.list.len()];
+        let Some(series) = fundamentals.get(symbol) else {
+            return nan;
+        };
+        let m = series.metrics(date(&bars[j]));
+        let (_, price_to_sales) = m.valuation(bars[j].close);
+        let or_nan = |v: Option<f64>| v.unwrap_or(f64::NAN);
+        vec![
+            or_nan(m.revenue_growth_percent),
+            or_nan(m.acceleration_points),
+            or_nan(m.gross_margin_percent),
+            or_nan(m.gross_margin_change_points),
+            or_nan(m.share_growth_percent),
+            or_nan(price_to_sales),
+            price_indicators(bars, j)[2],
+            f64::NAN,
+        ]
+    }
+
+    /// The composite from an observation's other quintiles, or NaN.
+    fn combine(&self, obs: &Observation) -> f64 {
+        let q = &obs.quintiles;
+        if self.fundamentals.is_some() {
+            // Growth, acceleration, cheapness, and momentum.
+            if [q[0], q[1], q[5], q[6]].iter().all(|&x| x > 0) {
+                f64::from(q[0] + q[1] + (6 - q[5]) + q[6])
+            } else {
+                f64::NAN
+            }
+        } else if q[1] > 0 && q[2] > 0 {
+            f64::from(q[1] + q[2] + obs.scores[3])
+        } else {
+            f64::NAN
+        }
+    }
+}
 struct Indicator {
     name: &'static str,
     expect: &'static str,
 }
 
-/// Raw indicator values at bar `j`, in [`INDICATORS`] order; NaN where the
-/// history is too short.
-fn indicators(bars: &[Bar], j: usize) -> [f64; 6] {
+/// Raw price indicator values at bar `j`, in [`PRICE_INDICATORS`] order;
+/// NaN where the history is too short.
+fn price_indicators(bars: &[Bar], j: usize) -> [f64; 6] {
     let close = |k: usize| j.checked_sub(k).map_or(f64::NAN, |i| bars[i].close);
     let week = close(0) / close(5) - 1.0;
     let year = &bars[j.saturating_sub(251)..=j];
@@ -196,6 +304,13 @@ pub fn run_cli(args: &[String]) -> Result<()> {
         bail!("--horizon must be at least 1 day");
     }
     let universe = take_flag(&mut args, "--universe")?.unwrap_or_else(|| "large".into());
+    let use_fundamentals = match args.iter().position(|a| a == "--fundamentals") {
+        Some(at) => {
+            args.remove(at);
+            true
+        }
+        None => false,
+    };
 
     let alpaca = AlpacaClient::from_env()?;
     let cache = BarCache::today()?;
@@ -255,11 +370,25 @@ pub fn run_cli(args: &[String]) -> Result<()> {
         }
         other => bail!("unknown universe {other:?}; use large, screened, or liquid"),
     };
-    let observations = observe_all(&benchmark, &stocks, horizon, screen.as_ref());
+    let fundamentals = if use_fundamentals {
+        let config = Config::load_or_create()?;
+        let edgar = crate::market::edgar::EdgarClient::new(&config.edgar.contact)?;
+        Some(runtime.block_on(crate::fundamentals::series_from_frames(
+            &edgar,
+            Utc::now().date_naive(),
+        ))?)
+    } else {
+        None
+    };
+    let set = match &fundamentals {
+        Some(f) => IndicatorSet::growth(f),
+        None => IndicatorSet::price(),
+    };
+    let observations = observe_all(&benchmark, &stocks, horizon, screen.as_ref(), &set);
     if observations.is_empty() {
         bail!("no observations; is there enough history?");
     }
-    print!("{}", report(&observations, &description, horizon));
+    print!("{}", report(&observations, &description, horizon, &set));
     Ok(())
 }
 
@@ -570,10 +699,11 @@ struct Observation {
     /// `forward` minus the universe's mean `forward` on the same date; set
     /// once every symbol is observed.
     excess: f64,
-    /// Raw [`INDICATORS`] values, and their quintiles on the date (0 when
-    /// unavailable); quintiles are set once every symbol is observed.
-    indicators: [f64; 6],
-    quintiles: [u8; 6],
+    /// Raw indicator values for the run's [`IndicatorSet`], and their
+    /// quintiles on the date (0 when unavailable); both are set once every
+    /// symbol is observed.
+    indicators: Vec<f64>,
+    quintiles: Vec<u8>,
 }
 
 fn date(bar: &Bar) -> NaiveDate {
@@ -600,6 +730,7 @@ fn observe_all(
     stocks: &[Series],
     horizon: usize,
     screen: Option<&Screen>,
+    set: &IndicatorSet,
 ) -> Vec<Observation> {
     let mut observations = Vec::new();
     let mut i = 0;
@@ -618,7 +749,9 @@ fn observe_all(
         };
         for (k, j) in sampled {
             let bars = &stocks[k].bars;
-            if let Some(obs) = observe(bars, j, horizon, bench_now.as_ref(), bench_forward) {
+            if let Some(mut obs) = observe(bars, j, horizon, bench_now.as_ref(), bench_forward) {
+                obs.indicators = set.raw(&stocks[k].symbol, bars, j);
+                obs.quintiles = vec![0; set.list.len()];
                 observations.push(obs);
             }
         }
@@ -628,15 +761,10 @@ fn observe_all(
             for obs in today.iter_mut() {
                 obs.excess = obs.forward - mean;
             }
-            for k in 0..INDICATORS.len() {
-                if k == COMPOSITE {
+            for k in 0..set.list.len() {
+                if k == set.composite {
                     for obs in today.iter_mut() {
-                        let (high, momentum) = (obs.quintiles[1], obs.quintiles[2]);
-                        obs.indicators[COMPOSITE] = if high > 0 && momentum > 0 {
-                            f64::from(high + momentum + obs.scores[3])
-                        } else {
-                            f64::NAN
-                        };
+                        obs.indicators[k] = set.combine(obs);
                     }
                 }
                 let values: Vec<f64> = today.iter().map(|o| o.indicators[k]).collect();
@@ -688,8 +816,8 @@ fn observe(
         benchmark_forward,
         bracketed: simulate_trade(ahead, now.atr_14?),
         excess: 0.0,
-        indicators: indicators(bars, j),
-        quintiles: [0; 6],
+        indicators: Vec::new(),
+        quintiles: Vec::new(),
     })
 }
 
@@ -779,7 +907,12 @@ fn spread(
     t_stat(&spreads)
 }
 
-fn report(observations: &[Observation], universe: &str, horizon: usize) -> String {
+fn report(
+    observations: &[Observation],
+    universe: &str,
+    horizon: usize,
+    set: &IndicatorSet,
+) -> String {
     let dates: Vec<NaiveDate> = {
         let mut d: Vec<_> = observations.iter().map(|o| o.date).collect();
         d.dedup();
@@ -822,7 +955,7 @@ fn report(observations: &[Observation], universe: &str, horizon: usize) -> Strin
 
     out += "\ncandidate indicators (quintiles across the names sampled each date; \
             spread is Q5 minus Q1)\n";
-    for (k, indicator) in INDICATORS.iter().enumerate() {
+    for (k, indicator) in set.list.iter().enumerate() {
         out += &format!(
             "\n{} — expect {}\n{BUCKET_HEADER}",
             indicator.name, indicator.expect
@@ -935,7 +1068,7 @@ fn report(observations: &[Observation], universe: &str, horizon: usize) -> Strin
             .map(|(_, obs)| {
                 let picked: Vec<f64> = obs
                     .iter()
-                    .filter(|o| o.quintiles[COMPOSITE] == 5)
+                    .filter(|o| o.quintiles[set.composite] == 5)
                     .map(|o| o.held)
                     .collect();
                 trades.extend(&picked);
@@ -1134,14 +1267,17 @@ mod tests {
     #[test]
     fn indicators_use_only_past_bars() {
         let bars = series(800);
-        let before = indicators(&bars, 700);
+        let before = price_indicators(&bars, 700);
         let mut altered = bars.clone();
         for b in &mut altered[701..] {
             b.close *= 2.0;
             b.volume *= 2;
         }
         // The composite is filled in later, across names.
-        assert_eq!(before[..COMPOSITE], indicators(&altered, 700)[..COMPOSITE]);
+        assert_eq!(
+            before[..COMPOSITE],
+            price_indicators(&altered, 700)[..COMPOSITE]
+        );
         assert!(before[..COMPOSITE].iter().all(|v| v.is_finite()));
     }
 
@@ -1186,7 +1322,13 @@ mod tests {
             symbol: "B".into(),
             bars: b_bars,
         };
-        let observations = observe_all(&bench, &[a, b], DEFAULT_HORIZON, None);
+        let observations = observe_all(
+            &bench,
+            &[a, b],
+            DEFAULT_HORIZON,
+            None,
+            &IndicatorSet::price(),
+        );
         assert!(!observations.is_empty());
         for (_, obs) in by_period(&observations) {
             let total: f64 = obs.iter().map(|o| o.excess).sum();

@@ -107,7 +107,6 @@ impl EdgarClient {
     /// One figure for every company in one period, e.g. tag `Revenues`,
     /// unit `USD`, period `CY2024Q3` (`CY2024Q3I` for point-in-time
     /// figures, `CY2024` for years). Rows are (CIK, start, end, value).
-    #[allow(dead_code)] // for the growth style, in progress
     pub async fn frame(
         &self,
         taxonomy: &str,

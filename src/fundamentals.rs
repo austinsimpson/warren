@@ -11,9 +11,6 @@
 //! Companies rarely report a fourth quarter on its own, so it is derived
 //! from the fiscal year less the three quarters within it.
 
-// The growth style that uses this is in progress.
-#![allow(dead_code)]
-
 use std::{
     collections::{BTreeMap, HashMap},
     fs,
