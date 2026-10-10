@@ -62,7 +62,7 @@ pub struct Schedule {
     pub research_stale_after_hours: u64,
     /// Upper bound on research runs per cycle, to bound cost.
     pub max_research_per_cycle: usize,
-    /// Hard cap on agent runs per calendar day across all agents.
+    /// Hard cap on one agent's runs per local calendar day.
     pub max_agent_runs_per_day: usize,
 }
 
