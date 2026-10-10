@@ -2,7 +2,17 @@
 //! over daily history, scoring each stock every `horizon` trading days from
 //! only the bars available that day, then measures what happened next.
 //!
-//! Run with `cargo run --release -- backtest [--horizon DAYS] [SYMBOL ...]`.
+//! Run with `cargo run --release -- backtest [--horizon DAYS]
+//! [--universe large|screened] [SYMBOL ...]`.
+//!
+//! Universes:
+//! - `large` (the default): roughly today's S&P 100, every name on every
+//!   sample date.
+//! - `screened`: what exploration would have seen. Each sample date
+//!   rebuilds its screen from that day's bars across every listed US stock:
+//!   names above exploration's price and dollar-volume floors, then the most
+//!   active by volume plus the biggest gainers and losers. Exploration picks a
+//!   few of these by judgment; this tests all of them.
 //!
 //! What this can and can't tell you:
 //! - Only the quant factors are tested. Catalyst, news, and setup are judged
@@ -10,14 +20,21 @@
 //!   past dates would leak the outcome. Forward paper trading tests those.
 //! - Conviction here is the equal-weight mean of the four quant factors
 //!   alone, so it is not on quite the same footing as a live report's.
-//! - The default universe is roughly today's S&P 100. Names that were
-//!   dropped or delisted are missing, which flatters every return here
-//!   (survivorship bias). Factors are judged mainly against the equal-weight
-//!   universe on the same dates, which carries the same bias, so their
-//!   relative edge is more trustworthy than any absolute return.
+//! - Both universes start from today's listings, so names since delisted
+//!   are missing (survivorship bias). That flatters returns, most of all
+//!   among screened small and mid caps, where failures are common. Factors
+//!   are judged mainly against the rest of the universe on the same dates,
+//!   which carries the same bias, so their relative edge is more trustworthy
+//!   than any absolute return.
+//! - Scoring needs the same 550 days of history live research uses, so
+//!   recent listings join only once they have it.
 //! - Samples are `horizon` days apart, so forward windows don't overlap.
 
-use std::{collections::BTreeMap, fs, path::PathBuf};
+use std::{
+    collections::{BTreeMap, HashMap, HashSet},
+    fs,
+    path::PathBuf,
+};
 
 use anyhow::{Context as _, Result, bail};
 use chrono::{NaiveDate, Utc};
@@ -28,7 +45,8 @@ use crate::agents::{
     technicals::{self, Technicals},
     tools::BENCHMARK,
 };
-use crate::market::alpaca::{AlpacaClient, Bar};
+use crate::config::Config;
+use crate::market::alpaca::{AlpacaClient, Bar, Timeframe};
 
 /// The earliest SIP history Alpaca serves.
 const HISTORY_START: &str = "2016-01-01T00:00:00Z";
@@ -60,46 +78,216 @@ const UNIVERSE: &[&str] = &[
     "UBER", "UNH", "UNP", "UPS", "USB", "V", "VZ", "WFC", "WMT", "XOM",
 ];
 
-/// Entry point for `warren backtest [--horizon DAYS] [SYMBOL ...]`.
-pub fn run_cli(args: &[String]) -> Result<()> {
-    let mut horizon = DEFAULT_HORIZON;
-    let mut args = args.to_vec();
-    if let Some(at) = args.iter().position(|a| a == "--horizon") {
-        let days = args
-            .get(at + 1)
-            .context("--horizon needs a number of days")?;
-        horizon = days.parse().context("--horizon needs a number of days")?;
-        if horizon == 0 {
-            bail!("--horizon must be at least 1 day");
-        }
-        args.drain(at..at + 2);
-    }
-    let symbols: Vec<String> = if args.is_empty() {
-        UNIVERSE.iter().map(|s| s.to_string()).collect()
-    } else {
-        args.iter().map(|s| s.trim().to_uppercase()).collect()
+/// Removes `--name VALUE` from `args` and returns the value.
+fn take_flag(args: &mut Vec<String>, name: &str) -> Result<Option<String>> {
+    let Some(at) = args.iter().position(|a| a == name) else {
+        return Ok(None);
     };
+    let value = args
+        .get(at + 1)
+        .with_context(|| format!("{name} needs a value"))?
+        .clone();
+    args.drain(at..at + 2);
+    Ok(Some(value))
+}
+
+/// Entry point for `warren backtest`; see the module docs.
+pub fn run_cli(args: &[String]) -> Result<()> {
+    let mut args = args.to_vec();
+    let horizon = match take_flag(&mut args, "--horizon")? {
+        Some(days) => days.parse().context("--horizon needs a number of days")?,
+        None => DEFAULT_HORIZON,
+    };
+    if horizon == 0 {
+        bail!("--horizon must be at least 1 day");
+    }
+    let universe = take_flag(&mut args, "--universe")?.unwrap_or_else(|| "large".into());
+
     let alpaca = AlpacaClient::from_env()?;
     let cache = BarCache::today()?;
-    let (benchmark, stocks) = crate::runtime::RUNTIME.block_on(fetch(&alpaca, &cache, symbols))?;
-    let observations = observe_all(&benchmark, &stocks, horizon);
+    let runtime = &crate::runtime::RUNTIME;
+    let benchmark = runtime
+        .block_on(cache.history(&alpaca, BENCHMARK))
+        .context("fetching benchmark bars")?;
+    let (stocks, screen, description) = match universe.as_str() {
+        "large" => {
+            let symbols: Vec<String> = if args.is_empty() {
+                UNIVERSE.iter().map(|s| s.to_string()).collect()
+            } else {
+                args.iter().map(|s| s.trim().to_uppercase()).collect()
+            };
+            let stocks = runtime.block_on(fetch(&alpaca, &cache, symbols));
+            let description = format!("{} large caps", stocks.len());
+            (stocks, None, description)
+        }
+        "screened" => {
+            let config = Config::load_or_create()?;
+            let screen = Screen {
+                min_price: config.exploration.min_price,
+                min_dollar_volume: config.exploration.min_avg_dollar_volume,
+                ..Screen::default()
+            };
+            let stocks = runtime.block_on(fetch_screened_pool(&alpaca, &cache, &screen))?;
+            let description = format!(
+                "exploration's screen over {} listed stocks (top {} by volume plus top {} \
+                 gainers and losers, price >= ${:.0}, 20-day dollar volume >= ${:.0}M)",
+                stocks.len(),
+                screen.most_active,
+                screen.movers,
+                screen.min_price,
+                screen.min_dollar_volume / 1e6,
+            );
+            (stocks, Some(screen), description)
+        }
+        other => bail!("unknown universe {other:?}; use large or screened"),
+    };
+    let observations = observe_all(&benchmark, &stocks, horizon, screen.as_ref());
     if observations.is_empty() {
         bail!("no observations; is there enough history?");
     }
-    print!("{}", report(&observations, stocks.len(), horizon));
+    print!("{}", report(&observations, &description, horizon));
     Ok(())
 }
 
-/// Daily bars for SPY and each symbol. Symbols that fail are skipped.
-async fn fetch(
+/// Exploration's screen, rebuilt from one day's bars.
+#[derive(Debug, Clone)]
+struct Screen {
+    min_price: f64,
+    min_dollar_volume: f64,
+    /// Names taken by that day's share volume, as Alpaca's most-actives.
+    most_active: usize,
+    /// Names taken from each end of that day's percent change.
+    movers: usize,
+}
+
+impl Default for Screen {
+    fn default() -> Self {
+        Self {
+            min_price: 5.0,
+            min_dollar_volume: 20_000_000.0,
+            most_active: 100,
+            movers: 50,
+        }
+    }
+}
+
+/// One stock as the screen sees it on a day.
+struct ScreenRow {
+    stock: usize,
+    bar: usize,
+    volume: u64,
+    change: f64,
+}
+
+impl Screen {
+    /// The (stock, bar index) pairs the screen picks on `day`.
+    fn select(&self, stocks: &[Series], day: NaiveDate) -> Vec<(usize, usize)> {
+        let mut rows: Vec<ScreenRow> = stocks
+            .iter()
+            .enumerate()
+            .filter_map(|(stock, series)| {
+                let bars = &series.bars;
+                let j = bars.binary_search_by_key(&day, date).ok()?;
+                let last_20 = bars.get(j.checked_sub(19)?..=j)?;
+                let dollar_volume = last_20
+                    .iter()
+                    .map(|b| b.close * b.volume as f64)
+                    .sum::<f64>()
+                    / 20.0;
+                let (bar, prev) = (&bars[j], &bars[j - 1]);
+                (bar.close >= self.min_price && dollar_volume >= self.min_dollar_volume).then(
+                    || ScreenRow {
+                        stock,
+                        bar: j,
+                        volume: bar.volume,
+                        change: bar.close / prev.close - 1.0,
+                    },
+                )
+            })
+            .collect();
+
+        let mut picked = HashSet::new();
+        rows.sort_by(|a, b| b.volume.cmp(&a.volume));
+        picked.extend(rows.iter().take(self.most_active).map(|r| (r.stock, r.bar)));
+        rows.sort_by(|a, b| b.change.total_cmp(&a.change));
+        picked.extend(rows.iter().take(self.movers).map(|r| (r.stock, r.bar)));
+        picked.extend(rows.iter().rev().take(self.movers).map(|r| (r.stock, r.bar)));
+        let mut picked: Vec<_> = picked.into_iter().collect();
+        picked.sort();
+        picked
+    }
+}
+
+/// Listings exploration could pick: common stocks and ADRs on the major
+/// exchanges, not funds, warrants, units, rights, notes, or preferreds.
+fn is_screenable(asset: &crate::market::alpaca::Asset) -> bool {
+    const EXCLUDED: [&str; 10] = [
+        "ETF", "Fund", "Warrant", " Unit", "Right", "Notes", "Preferred", "%", "ETN", "Trust",
+    ];
+    asset.tradable
+        && matches!(asset.exchange.as_str(), "NYSE" | "NASDAQ" | "AMEX")
+        && !EXCLUDED.iter().any(|word| asset.name.contains(word))
+}
+
+/// Daily bars for every listing that was ever liquid enough to pass the
+/// screen. A monthly-bar pass narrows the listings first, so daily history
+/// is fetched only for names that could matter.
+async fn fetch_screened_pool(
     alpaca: &AlpacaClient,
     cache: &BarCache,
-    symbols: Vec<String>,
-) -> Result<(Vec<Bar>, Vec<Series>)> {
-    let benchmark = cache
-        .history(alpaca, BENCHMARK)
-        .await
-        .context("fetching benchmark bars")?;
+    screen: &Screen,
+) -> Result<Vec<Series>> {
+    let pool_path = cache.dir.join("screened_pool.json");
+    let pool: Vec<String> = match fs::read(&pool_path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+    {
+        Some(pool) => pool,
+        None => {
+            let listings: Vec<String> = alpaca
+                .us_equities()
+                .await?
+                .iter()
+                .filter(|a| is_screenable(a))
+                .map(|a| a.symbol.clone())
+                .collect();
+            eprintln!("{} listings; checking monthly liquidity", listings.len());
+            let start = HISTORY_START.parse()?;
+            let mut pool = Vec::new();
+            for batch in listings.chunks(BATCH) {
+                let monthly = alpaca
+                    .sip_bars_many(batch, Timeframe::Months(1), start)
+                    .await?;
+                // A month of about 21 sessions at three quarters of the daily
+                // floor: generous, since the daily screen decides.
+                let floor = screen.min_dollar_volume * 21.0 * 0.75;
+                pool.extend(monthly.into_iter().filter_map(|(symbol, bars)| {
+                    bars.iter()
+                        .any(|b| b.close >= screen.min_price && b.close * b.volume as f64 >= floor)
+                        .then_some(symbol)
+                }));
+            }
+            pool.sort();
+            fs::write(&pool_path, serde_json::to_vec(&pool)?)?;
+            pool
+        }
+    };
+    eprintln!("{} listings were ever liquid enough; fetching daily bars", pool.len());
+    let bars = cache.history_many(alpaca, &pool).await?;
+    let mut stocks: Vec<Series> = bars
+        .into_iter()
+        .filter(|(_, bars)| !bars.is_empty())
+        .map(|(symbol, bars)| Series { symbol, bars })
+        .collect();
+    stocks.sort_by(|a, b| a.symbol.cmp(&b.symbol));
+    Ok(stocks)
+}
+
+/// Symbols per multi-symbol bars request.
+const BATCH: usize = 100;
+
+/// Daily bars for each symbol. Symbols that fail are skipped.
+async fn fetch(alpaca: &AlpacaClient, cache: &BarCache, symbols: Vec<String>) -> Vec<Series> {
     let total = symbols.len();
     let mut stocks: Vec<Series> = stream::iter(symbols)
         .map(|symbol| async move {
@@ -124,7 +312,7 @@ async fn fetch(
         .await;
     stocks.sort_by(|a, b| a.symbol.cmp(&b.symbol));
     eprintln!("fetched {} of {total} symbols", stocks.len());
-    Ok((benchmark, stocks))
+    stocks
 }
 
 /// Today's daily history per symbol, kept on disk so reruns with other
@@ -149,18 +337,62 @@ impl BarCache {
         Ok(Self { dir })
     }
 
+    fn path(&self, symbol: &str) -> PathBuf {
+        // Class shares like BRK.B keep their dot; `/` can't be in a file name.
+        self.dir.join(format!("{}.json", symbol.replace('/', "_")))
+    }
+
+    fn cached(&self, symbol: &str) -> Option<Vec<Bar>> {
+        serde_json::from_slice(&fs::read(self.path(symbol)).ok()?).ok()
+    }
+
+    fn store(&self, symbol: &str, bars: &[Bar]) -> Result<()> {
+        let path = self.path(symbol);
+        fs::write(&path, serde_json::to_vec(bars)?)
+            .with_context(|| format!("writing {}", path.display()))
+    }
+
     async fn history(&self, alpaca: &AlpacaClient, symbol: &str) -> Result<Vec<Bar>> {
-        let path = self.dir.join(format!("{symbol}.json"));
-        if let Some(bars) = fs::read(&path)
-            .ok()
-            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-        {
+        if let Some(bars) = self.cached(symbol) {
             return Ok(bars);
         }
         let bars = alpaca.daily_history(symbol, HISTORY_START.parse()?).await?;
-        fs::write(&path, serde_json::to_vec(&bars)?)
-            .with_context(|| format!("writing {}", path.display()))?;
+        self.store(symbol, &bars)?;
         Ok(bars)
+    }
+
+    /// Like [`Self::history`] for many symbols, fetching the uncached ones
+    /// in batches. Symbols without bars map to an empty history.
+    async fn history_many(
+        &self,
+        alpaca: &AlpacaClient,
+        symbols: &[String],
+    ) -> Result<HashMap<String, Vec<Bar>>> {
+        let mut out = HashMap::new();
+        let mut missing = Vec::new();
+        for symbol in symbols {
+            match self.cached(symbol) {
+                Some(bars) => {
+                    out.insert(symbol.clone(), bars);
+                }
+                None => missing.push(symbol.clone()),
+            }
+        }
+        let start = HISTORY_START.parse()?;
+        for (i, batch) in missing.chunks(BATCH).enumerate() {
+            eprintln!(
+                "  daily bars {}/{} symbols",
+                (i * BATCH + batch.len()),
+                missing.len()
+            );
+            let mut fetched = alpaca.sip_bars_many(batch, Timeframe::Day, start).await?;
+            for symbol in batch {
+                let bars = fetched.remove(symbol).unwrap_or_default();
+                self.store(symbol, &bars)?;
+                out.insert(symbol.clone(), bars);
+            }
+        }
+        Ok(out)
     }
 }
 
@@ -207,8 +439,14 @@ fn window(bars: &[Bar], end: usize) -> Option<&[Bar]> {
     Some(&bars[start..=end])
 }
 
-/// Sample every symbol on every `horizon`th benchmark trading day.
-fn observe_all(benchmark: &[Bar], stocks: &[Series], horizon: usize) -> Vec<Observation> {
+/// Sample on every `horizon`th benchmark trading day: every symbol, or
+/// only what `screen` picks that day.
+fn observe_all(
+    benchmark: &[Bar],
+    stocks: &[Series],
+    horizon: usize,
+    screen: Option<&Screen>,
+) -> Vec<Observation> {
     let mut observations = Vec::new();
     let mut i = 0;
     while i + horizon < benchmark.len() {
@@ -216,11 +454,17 @@ fn observe_all(benchmark: &[Bar], stocks: &[Series], horizon: usize) -> Vec<Obse
         let bench_now = window(benchmark, i).and_then(technicals::compute);
         let bench_forward = benchmark[i + horizon].close / benchmark[i + 1].open - 1.0;
         let first = observations.len();
-        for stock in stocks {
-            let Ok(j) = stock.bars.binary_search_by_key(&day, date) else {
-                continue;
-            };
-            if let Some(obs) = observe(&stock.bars, j, horizon, bench_now.as_ref(), bench_forward) {
+        let sampled: Vec<(usize, usize)> = match screen {
+            Some(screen) => screen.select(stocks, day),
+            None => stocks
+                .iter()
+                .enumerate()
+                .filter_map(|(k, s)| Some((k, s.bars.binary_search_by_key(&day, date).ok()?)))
+                .collect(),
+        };
+        for (k, j) in sampled {
+            let bars = &stocks[k].bars;
+            if let Some(obs) = observe(bars, j, horizon, bench_now.as_ref(), bench_forward) {
                 observations.push(obs);
             }
         }
@@ -363,7 +607,7 @@ fn spread(
     t_stat(&spreads)
 }
 
-fn report(observations: &[Observation], symbols: usize, horizon: usize) -> String {
+fn report(observations: &[Observation], universe: &str, horizon: usize) -> String {
     let dates: Vec<NaiveDate> = {
         let mut d: Vec<_> = observations.iter().map(|o| o.date).collect();
         d.dedup();
@@ -371,10 +615,10 @@ fn report(observations: &[Observation], symbols: usize, horizon: usize) -> Strin
     };
     let midpoint = dates[dates.len() / 2];
     let mut out = format!(
-        "Quant factor backtest: {symbols} symbols, {} to {}, {} dates, {} observations\n\
+        "Quant factor backtest: {universe}\n{} to {}, {} dates, {} observations.\n\
          Held {horizon} trading days from the next open. \"vs universe\" is the mean \
-         return above the\nequal-weight universe on the same dates; \"beat it\" is how \
-         often. Spreads are per-date\nmeans of high (4–5) minus low (1–2) scores, with \
+         return above the\nequal-weight average of the names sampled on the same date; \
+         \"beat it\" is how often. Spreads are per-date\nmeans of high (4–5) minus low (1–2) scores, with \
          t-statistics over dates (|t| > 2 is\nworth noticing).\n",
         dates[0],
         dates[dates.len() - 1],
@@ -653,12 +897,51 @@ mod tests {
             symbol: "B".into(),
             bars: b_bars,
         };
-        let observations = observe_all(&bench, &[a, b], DEFAULT_HORIZON);
+        let observations = observe_all(&bench, &[a, b], DEFAULT_HORIZON, None);
         assert!(!observations.is_empty());
         for (_, obs) in by_period(&observations) {
             let total: f64 = obs.iter().map(|o| o.excess).sum();
             assert!(total.abs() < 1e-12);
         }
+    }
+
+    #[test]
+    fn screen_picks_liquid_actives_and_movers_that_day() {
+        // Five liquid names with distinct volumes and moves, and one too
+        // cheap to qualify.
+        let make = |symbol: &str, price: f64, volume: u64, last_change: f64| {
+            let mut bars: Vec<Bar> = (0..30).map(|d| bar(d, price, price, price, price)).collect();
+            for b in &mut bars {
+                b.volume = volume;
+            }
+            let last = bars.last_mut().unwrap();
+            last.close = price * (1.0 + last_change);
+            Series {
+                symbol: symbol.into(),
+                bars,
+            }
+        };
+        let stocks = vec![
+            make("BIG", 50.0, 9_000_000, 0.00),
+            make("UP", 50.0, 1_000_000, 0.20),
+            make("DOWN", 50.0, 1_000_000, -0.15),
+            make("FLAT1", 50.0, 1_000_000, 0.01),
+            make("FLAT2", 50.0, 1_000_000, -0.01),
+            make("PENNY", 2.0, 90_000_000, 0.50),
+        ];
+        let screen = Screen {
+            min_price: 5.0,
+            min_dollar_volume: 20_000_000.0,
+            most_active: 1,
+            movers: 1,
+        };
+        let day = date(&stocks[0].bars[29]);
+        let picked: Vec<&str> = screen
+            .select(&stocks, day)
+            .iter()
+            .map(|&(k, _)| stocks[k].symbol.as_str())
+            .collect();
+        assert_eq!(picked, ["BIG", "UP", "DOWN"]);
     }
 
     /// Runs the default backtest against live Alpaca data; see the module

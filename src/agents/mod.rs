@@ -34,7 +34,11 @@ use rig_agent::{
         HookContext, ModelTurnAction, ModelTurnFinished, OutcomeAction, OutcomeEvent,
     },
 };
-use rig_core::{catalog::Catalog, completion::Usage, providers::anthropic::Anthropic};
+use rig_core::{
+    catalog::Catalog,
+    completion::{CacheRetention, Usage},
+    providers::anthropic::Anthropic,
+};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -170,6 +174,11 @@ impl AgentCtx {
         let completion = Anthropic::from_env()?.completion(model.model.clone());
         Ok(AgentBuilder::new(completion)
             .preamble(preamble)
+            // Every turn resends the conversation so far, so turns after the
+            // first read most of their input from the cache (a twentieth of
+            // the price). Five-minute retention covers a run and the parallel
+            // research runs of a cycle; cycles are too far apart for longer.
+            .cache(CacheRetention::Short)
             .max_tokens(model.max_tokens)
             .default_max_turns(model.max_turns)
             .add_hook(TraceHook {

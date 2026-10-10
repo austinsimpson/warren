@@ -50,6 +50,52 @@ impl AlpacaClient {
             .await
     }
 
+    /// SIP bars for many symbols at once, through 16 minutes ago, keyed by
+    /// symbol; symbols without bars are absent. Pages hold at most 10,000
+    /// bars across all symbols.
+    pub async fn sip_bars_many(
+        &self,
+        symbols: &[String],
+        timeframe: Timeframe,
+        start: DateTime<Utc>,
+    ) -> Result<HashMap<String, Vec<Bar>>> {
+        #[derive(Deserialize)]
+        struct Page {
+            bars: Option<HashMap<String, Vec<Bar>>>,
+            next_page_token: Option<String>,
+        }
+        let symbols = symbols.join(",");
+        let timeframe = timeframe.to_string();
+        let start = start.to_rfc3339_opts(SecondsFormat::Secs, true);
+        let end = (Utc::now() - chrono::Duration::minutes(16))
+            .to_rfc3339_opts(SecondsFormat::Secs, true);
+        let mut bars: HashMap<String, Vec<Bar>> = HashMap::new();
+        let mut page_token: Option<String> = None;
+        loop {
+            let mut query = vec![
+                ("symbols", symbols.as_str()),
+                ("timeframe", timeframe.as_str()),
+                ("start", start.as_str()),
+                ("end", end.as_str()),
+                ("feed", "sip"),
+                ("adjustment", "all"),
+                ("limit", "10000"),
+            ];
+            if let Some(token) = page_token.as_deref() {
+                query.push(("page_token", token));
+            }
+            let page: Page =
+                send_json(self.data_request(Method::GET, "/v2/stocks/bars").query(&query)).await?;
+            for (symbol, page_bars) in page.bars.unwrap_or_default() {
+                bars.entry(symbol).or_default().extend(page_bars);
+            }
+            match page.next_page_token {
+                Some(token) => page_token = Some(token),
+                None => return Ok(bars),
+            }
+        }
+    }
+
     /// Bars following pagination. Prices are adjusted for splits and
     /// dividends, so returns and averages are continuous across them.
     async fn fetch_bars(

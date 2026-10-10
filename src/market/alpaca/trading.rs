@@ -77,6 +77,14 @@ impl AlpacaClient {
             .collect())
     }
 
+    /// Every active US equity listing, tradable or not.
+    pub async fn us_equities(&self) -> Result<Vec<Asset>> {
+        let request = self
+            .trading_request(Method::GET, "/v2/assets")
+            .query(&[("status", "active"), ("asset_class", "us_equity")]);
+        send_json(request).await
+    }
+
     pub async fn cancel_order(&self, order_id: &str) -> Result<()> {
         let path = format!("/v2/orders/{order_id}");
         send(self.trading_request(Method::DELETE, &path)).await?;
