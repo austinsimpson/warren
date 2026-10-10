@@ -45,6 +45,8 @@ use tokio::sync::mpsc::UnboundedSender;
 
 use crate::config::{AgentModel, Config};
 use crate::market::alpaca::AlpacaClient;
+use crate::market::edgar::EdgarClient;
+use crate::sectors::SectorDirectory;
 use crate::store::{RunRecord, Store};
 use crate::strategy::Strategy;
 
@@ -109,6 +111,8 @@ pub struct AgentCtx {
     pub stop: Arc<AtomicBool>,
     /// Shadow scorer, when enabled and configured.
     pub jev: Option<Arc<jev::JevScorer>>,
+    /// Company sectors from SEC EDGAR; `None` until a contact email is set.
+    pub sectors: Option<Arc<SectorDirectory>>,
     /// The user-created agent this context runs for. `config` and `store`
     /// are its own.
     pub strategy: Arc<Strategy>,
@@ -386,6 +390,18 @@ impl AgentCtx {
             },
             meter: Meter::default(),
             strategy: Arc::new(strategy),
+            sectors: None,
+        };
+        let mut ctx = ctx;
+        ctx.sectors = match (
+            EdgarClient::new(&ctx.config.edgar.contact),
+            Store::default_dir(),
+        ) {
+            (Ok(edgar), Ok(root)) => Some(Arc::new(SectorDirectory::open(edgar, &root))),
+            _ => {
+                ctx.status("Sector data off: set edgar.contact in config.toml");
+                None
+            }
         };
         if ctx.config.jev.enabled && ctx.jev.is_none() {
             ctx.status("Jev shadow scoring disabled: set JEV_API_KEY");

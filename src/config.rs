@@ -17,6 +17,15 @@ pub struct Config {
     pub research: ResearchConfig,
     pub executor: ExecutorConfig,
     pub jev: JevConfig,
+    pub edgar: EdgarConfig,
+}
+
+/// SEC EDGAR, the source of sectors. The SEC requires a contact email in
+/// each request; sector filters are off until one is set.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct EdgarConfig {
+    pub contact: String,
 }
 
 /// Shadow scoring with TypeSafe's Jev; see `agents::jev`. Needs `JEV_API_KEY`.

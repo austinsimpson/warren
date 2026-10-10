@@ -8,6 +8,7 @@ mod portfolio;
 mod runtime;
 mod scorecard;
 mod scorecard_ui;
+mod sectors;
 mod store;
 mod strategy;
 mod theme;

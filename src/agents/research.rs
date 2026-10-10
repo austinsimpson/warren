@@ -190,6 +190,26 @@ pub async fn run(ctx: &AgentCtx, symbol: &str) -> Result<ResearchReport> {
     let config = &ctx.config.research.agent;
     ctx.recorded(AgentKind::Research, Some(&symbol), async |ctx| {
         let (quant, trend_health) = compute_quant_factors(ctx, &symbol).await?;
+        let sector = match &ctx.sectors {
+            Some(directory) => match directory.profile(&symbol).await {
+                Ok(Some(p)) => format!(
+                    "\n\nCompany: {} ({}){}.",
+                    p.sector.map_or("sector unknown", |s| s.label()),
+                    if p.sic_description.is_empty() {
+                        "no SEC industry code"
+                    } else {
+                        &p.sic_description
+                    },
+                    if p.foreign {
+                        ", incorporated outside the US"
+                    } else {
+                        ""
+                    },
+                ),
+                _ => String::new(),
+            },
+            None => String::new(),
+        };
         let agent = ctx
             .builder(AgentKind::Research, Some(&symbol), config, PREAMBLE.into())?
             .tool(GetAsset(ctx.clone()))
@@ -202,7 +222,7 @@ pub async fn run(ctx: &AgentCtx, symbol: &str) -> Result<ResearchReport> {
         let research = agent
             .prompt_typed::<ResearchFindings>(format!(
                 "Research {symbol} now ({}) and return your report.\n\n\
-                 Computed factors (fixed; do not re-score):\n{}",
+                 Computed factors (fixed; do not re-score):\n{}{sector}",
                 Utc::now().format("%Y-%m-%d %H:%M UTC"),
                 describe(&quant),
             ))

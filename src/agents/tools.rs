@@ -333,12 +333,67 @@ impl ScreenMarket {
                 .map(|m| json!({ "symbol": m.symbol, "price": m.price, "change_percent": round2(m.percent_change) }))
                 .collect()
         };
+        let mut lists = [
+            actives,
+            movers_above(&movers.gainers),
+            movers_above(&movers.losers),
+        ];
+        let note = label_sectors(&self.0, &mut lists).await;
+        let [most_active, gainers, losers] = lists;
         Ok(json!({
             "min_price_filter": min_price,
-            "most_active": actives,
-            "gainers": movers_above(&movers.gainers),
-            "losers": movers_above(&movers.losers),
+            "most_active": most_active,
+            "gainers": gainers,
+            "losers": losers,
+            "note": note,
         }))
+    }
+}
+
+/// Add each row's sector and drop rows outside the agent's universe.
+/// Returns a note on how the rows were filtered.
+async fn label_sectors(ctx: &AgentCtx, lists: &mut [Vec<Value>]) -> String {
+    let universe = &ctx.strategy.universe;
+    let restricted = !universe.sectors.is_empty() || !universe.allow_foreign;
+    let Some(directory) = &ctx.sectors else {
+        return if restricted {
+            "Sector data is off, so these are NOT filtered to this agent's sectors; buys \
+             outside them will be refused."
+                .into()
+        } else {
+            "Sector data is off.".into()
+        };
+    };
+    let mut symbols: Vec<String> = lists
+        .iter()
+        .flatten()
+        .filter_map(|row| Some(row["symbol"].as_str()?.to_string()))
+        .collect();
+    symbols.sort();
+    symbols.dedup();
+    let profiles = match directory.profiles(&symbols).await {
+        Ok(profiles) => profiles,
+        Err(err) => return format!("Sector lookup failed ({err:#}); rows are unfiltered."),
+    };
+    let mut dropped = 0;
+    for list in lists.iter_mut() {
+        list.retain_mut(|row| {
+            let Some(profile) = row["symbol"].as_str().and_then(|s| profiles.get(s)) else {
+                return !restricted;
+            };
+            if profile.exclusion(universe).is_some() {
+                dropped += 1;
+                return false;
+            }
+            row["sector"] = json!(profile.sector.map(|s| s.label()));
+            row["foreign"] = json!(profile.foreign);
+            true
+        });
+    }
+    if restricted {
+        format!("Filtered to this agent's universe; {dropped} names outside it were removed.")
+    } else {
+        "Sectors are from SEC industry codes.".into()
     }
 }
 
@@ -504,6 +559,36 @@ impl GetRiskLimits {
     }
 }
 
+/// Why this agent may not buy `symbol`, if it may not: an excluded ticker,
+/// or a sector or foreign issuer its universe leaves out.
+async fn check_universe(ctx: &AgentCtx, symbol: &str) -> Result<(), String> {
+    let universe = &ctx.strategy.universe;
+    if universe.excludes(symbol) {
+        return Err(format!("{symbol} is on this agent's excluded list"));
+    }
+    if universe.sectors.is_empty() && universe.allow_foreign {
+        return Ok(());
+    }
+    let Some(sectors) = &ctx.sectors else {
+        return Err(
+            "this agent limits sectors or foreign issuers, but sector data is off \
+                    (set edgar.contact in config.toml)"
+                .into(),
+        );
+    };
+    match sectors.profile(symbol).await {
+        Ok(Some(profile)) => match profile.exclusion(universe) {
+            Some(reason) => Err(format!(
+                "{symbol} is outside this agent's universe: {reason}"
+            )),
+            None => Ok(()),
+        },
+        Ok(None) | Err(_) => Err(format!(
+            "couldn't look up {symbol}'s sector to check this agent's universe"
+        )),
+    }
+}
+
 fn orders_today(ctx: &AgentCtx) -> anyhow::Result<usize> {
     let today = Local::now().date_naive();
     Ok(ctx
@@ -570,10 +655,10 @@ impl PlaceOrder {
         }
 
         let alpaca = &ctx.alpaca;
-        if side == OrderSide::Buy && ctx.strategy.universe.excludes(&symbol) {
-            return Err(ToolExecutionError::refused(format!(
-                "{symbol} is on this agent's excluded list"
-            )));
+        if side == OrderSide::Buy {
+            check_universe(ctx, &symbol)
+                .await
+                .map_err(ToolExecutionError::refused)?;
         }
         let quote_symbols = vec![symbol.clone(), BENCHMARK.to_string()];
         let (account, book, snapshots, asset) = tokio::try_join!(
