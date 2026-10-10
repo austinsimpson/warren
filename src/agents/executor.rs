@@ -178,8 +178,16 @@ Hard limits (place_order enforces these and refuses violations):
   inside or below it. Do not chase; if the price is above the range, place \
   a resting limit order or wait.
 - Buys need research rated buy/strong_buy with conviction >= {min_conv:.2}. \
-  Conviction is computed from the analyst's factor scores and the setup's \
-  reward-to-risk (0 = very bearish, 0.5 = neutral, 1 = very bullish).
+  Conviction is computed from catalyst, news sentiment, setup quality, \
+  extension, and reward-to-risk (0 = very bearish, 0.5 = neutral, 1 = very \
+  bullish).
+
+Context factors: reports also score trend, momentum, and relative strength, \
+but these are left out of conviction. Backtests over 2017–2026 found no edge \
+in them at swing horizons, on large caps or on stocks like the ones \
+exploration screens; among recent big movers, the strongest relative \
+strength did worst. Use them to understand a chart, not as reasons to buy or \
+to size up. Extension (not chasing stretched prices) did hold up.
 
 Lessons from your past decisions:
 {lessons}",

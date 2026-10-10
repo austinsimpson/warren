@@ -9,8 +9,14 @@
 //! - risk/reward is derived from the agent's entry, target, and stop, and the
 //!   price now.
 //!
-//! Conviction is the equal-weight mean of every available factor, rescaled
-//! to 0–1, and the rating follows from it.
+//! Conviction is the equal-weight mean of the scored factors that are
+//! available, rescaled to 0–1, and the rating follows from it. The scored
+//! factors are extension, catalyst, news sentiment, setup quality, and
+//! risk/reward. Trend, momentum, and relative strength are context only:
+//! backtests over 2017–2026, on large caps and on exploration's screen,
+//! found no edge in them at swing horizons (and among screened movers, the
+//! strongest relative strength did worst), while not buying extended names
+//! held up. They are still computed, shown, and tracked by the scorecard.
 
 use rig_core::schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -73,7 +79,23 @@ pub struct FactorScores {
 }
 
 impl FactorScores {
-    /// Available factors in display order.
+    /// Available factors that feed conviction.
+    pub fn scored(&self) -> Vec<(&'static str, &FactorScore)> {
+        self.named()
+            .into_iter()
+            .filter(|(name, _)| !CONTEXT_FACTORS.contains(name))
+            .collect()
+    }
+
+    /// Available context factors: shown and tracked, but not in conviction.
+    pub fn context(&self) -> Vec<(&'static str, &FactorScore)> {
+        self.named()
+            .into_iter()
+            .filter(|(name, _)| CONTEXT_FACTORS.contains(name))
+            .collect()
+    }
+
+    /// Every available factor in display order.
     pub fn named(&self) -> Vec<(&'static str, &FactorScore)> {
         [
             ("trend", self.quant.trend.as_ref()),
@@ -90,6 +112,9 @@ impl FactorScores {
         .collect()
     }
 }
+
+/// Factors left out of conviction; see the module docs.
+pub const CONTEXT_FACTORS: [&str; 3] = ["trend", "momentum", "rel strength"];
 
 /// What the code derives from the findings.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -129,20 +154,24 @@ pub fn score(
         }),
     };
 
-    let scores: Vec<f64> = factors
-        .named()
-        .iter()
-        .map(|(_, f)| f64::from(f.score))
-        .collect();
-    let mean = scores.iter().sum::<f64>() / scores.len() as f64;
-    let conviction = ((mean - 1.0) / 4.0).clamp(0.0, 1.0);
-
+    let conviction = conviction(&factors);
     let scored = Scored {
         rating: rating_for(conviction),
         conviction,
         risk_reward,
     };
     (scored, factors)
+}
+
+/// The mean of the scored factors, from 1–5 onto 0–1.
+pub fn conviction(factors: &FactorScores) -> f64 {
+    let scores: Vec<f64> = factors
+        .scored()
+        .iter()
+        .map(|(_, f)| f64::from(f.score))
+        .collect();
+    let mean = scores.iter().sum::<f64>() / scores.len() as f64;
+    ((mean - 1.0) / 4.0).clamp(0.0, 1.0)
 }
 
 pub fn rating_for(conviction: f64) -> Rating {
@@ -424,20 +453,32 @@ mod tests {
         assert_eq!(s.conviction, 0.5);
         assert_eq!(s.rating, Rating::Hold);
         assert_eq!(factors.named().len(), 6);
+        assert_eq!(factors.scored().len(), 3);
+        assert_eq!(factors.context().len(), 3);
     }
 
     #[test]
-    fn every_available_factor_weighs_equally() {
-        // Six 4s plus r/r 3:1 → 5: mean 29/7.
+    fn scored_factors_weigh_equally() {
+        // Judged 4s, extension 2, r/r 3:1 → 5: mean 19/5.
+        let mut quant = quant([4; 3]);
+        quant.extension = Some(factor(2));
         let (s, factors) = score(
             &findings([4; 3], (Some(100.0), Some(130.0), Some(90.0))),
-            quant([4; 3]),
+            quant,
             None,
         );
         assert_eq!(s.risk_reward, Some(3.0));
         assert_eq!(factors.risk_reward.as_ref().unwrap().score, 5);
-        assert!((s.conviction - (29.0 / 7.0 - 1.0) / 4.0).abs() < 1e-12);
+        assert!((s.conviction - (19.0 / 5.0 - 1.0) / 4.0).abs() < 1e-12);
         assert_eq!(s.rating, Rating::Buy);
+    }
+
+    #[test]
+    fn context_factors_do_not_move_conviction() {
+        let levels = (None, None, None);
+        let (bullish, _) = score(&findings([4; 3], levels), quant([5; 3]), None);
+        let (bearish, _) = score(&findings([4; 3], levels), quant([1; 3]), None);
+        assert_eq!(bullish.conviction, bearish.conviction);
     }
 
     #[test]

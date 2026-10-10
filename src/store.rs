@@ -129,7 +129,7 @@ impl Store {
         if !path.exists() {
             return Ok(None);
         }
-        Ok(read_json_file(&path).ok())
+        Ok(read_json_file(&path).ok().map(ResearchReport::upgraded))
     }
 
     /// The latest report for every researched symbol, newest first.
@@ -139,7 +139,7 @@ impl Store {
             let path = entry?.path();
             if path.extension().is_some_and(|ext| ext == "json") {
                 // Skip reports in an older format; see `report`.
-                reports.extend(read_json_file(&path).ok());
+                reports.extend(read_json_file(&path).ok().map(ResearchReport::upgraded));
             }
         }
         reports.sort_by(|a: &ResearchReport, b| b.generated_at.cmp(&a.generated_at));
@@ -164,6 +164,7 @@ impl Store {
         let reports: Vec<ResearchReport> = text
             .lines()
             .filter_map(|line| serde_json::from_str(line).ok())
+            .map(ResearchReport::upgraded)
             .collect();
         Ok(reports.into_iter())
     }
@@ -352,8 +353,12 @@ mod tests {
     fn history_keeps_current_version_and_skips_bad_lines() {
         let (store, dir) = temp_store();
         let live = crate::agents::test_support::sample_report("NU", SCORING_VERSION);
-        let old = crate::agents::test_support::sample_report("NU", SCORING_VERSION - 1);
+        // Unversioned reports are skipped; version 1 is rescored.
+        let old = crate::agents::test_support::sample_report("NU", 0);
+        let mut v1 = crate::agents::test_support::sample_report("NU", 1);
+        v1.conviction = 0.9;
         store.append_jsonl("research_history.jsonl", &old).unwrap();
+        store.append_jsonl("research_history.jsonl", &v1).unwrap();
         store.append_jsonl("research_history.jsonl", &live).unwrap();
         fs::OpenOptions::new()
             .append(true)
@@ -364,8 +369,10 @@ mod tests {
         store.save_report(&live).unwrap();
 
         let history = store.all_report_history().unwrap();
-        assert_eq!(history.len(), 2, "old version and bad line skipped");
+        assert_eq!(history.len(), 3, "unversioned report and bad line skipped");
         assert!(history.iter().all(|r| r.scoring_version == SCORING_VERSION));
+        // The sample's scored factors are all 3: rescored to neutral.
+        assert_eq!(history[0].conviction, 0.5);
         fs::remove_dir_all(dir).unwrap();
     }
 }

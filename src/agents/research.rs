@@ -77,7 +77,25 @@ pub struct ResearchFindings {
 
 /// Bump when scoring changes so reports scored differently are not compared
 /// as if they were the same scale.
-pub const SCORING_VERSION: u32 = 1;
+///
+/// - 1: every factor in conviction.
+/// - 2: trend, momentum, and relative strength moved to context; see
+///   [`scoring`](super::scoring). Version 1 reports are rescored on load,
+///   since conviction is computed from the factors they stored.
+pub const SCORING_VERSION: u32 = 2;
+
+impl ResearchReport {
+    /// Rescore a report from an older scoring version whose factors carry
+    /// over, so its conviction is on today's scale. Others are unchanged.
+    pub fn upgraded(mut self) -> Self {
+        if self.scoring_version == 1 {
+            self.conviction = scoring::conviction(&self.factors);
+            self.rating = scoring::rating_for(self.conviction);
+            self.scoring_version = SCORING_VERSION;
+        }
+        self
+    }
+}
 
 /// A stored report: the findings, the scores computed from them, and when and
 /// at what price they were made.

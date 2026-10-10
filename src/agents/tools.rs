@@ -346,7 +346,9 @@ tool!(
     GetResearchReport,
     "get_research_report",
     SymbolArgs,
-    "The latest full research report for a symbol, including when it was written."
+    "The latest full research report for a symbol, including when it was written. Its \
+     trend, momentum, and relative_strength factors are context only, not part of \
+     conviction."
 );
 
 impl GetResearchReport {
@@ -368,9 +370,10 @@ tool!(
     ListResearch,
     "list_research",
     NoArgs,
-    "One line per researched symbol: rating and conviction (both computed from factor \
-     scores; conviction 0 = very bearish, 0.5 = neutral, 1 = very bullish), reward-to-risk, \
-     target, stop, and report age."
+    "One line per researched symbol: rating and conviction (both computed from the \
+     scored factors; conviction 0 = very bearish, 0.5 = neutral, 1 = very bullish), \
+     reward-to-risk, target, stop, report age, and the context factors (trend, \
+     momentum, relative strength), which are not in conviction."
 );
 
 impl ListResearch {
@@ -389,6 +392,12 @@ impl ListResearch {
                     "stop_loss": r.findings.stop_loss,
                     "horizon_days": r.findings.horizon_days,
                     "age_hours": (Utc::now() - r.generated_at).num_hours(),
+                    "context": r
+                        .factors
+                        .context()
+                        .into_iter()
+                        .map(|(name, f)| (name.to_string(), json!(f.score)))
+                        .collect::<serde_json::Map<_, _>>(),
                 })
             })
             .collect();

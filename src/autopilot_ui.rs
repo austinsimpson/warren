@@ -361,7 +361,7 @@ impl Warren {
                         .flex_wrap()
                         .gap_x_2()
                         .text_size(px(TEXT_XS))
-                        .children(report.factors.named().into_iter().map(|(name, factor)| {
+                        .children(report.factors.scored().into_iter().map(|(name, factor)| {
                             // The r/r chip also shows the ratio behind its score,
                             // and judged factors show Jev's shadow score.
                             let ratio = (name == "r/r")
@@ -386,7 +386,18 @@ impl Warren {
                                 )
                                 .children(ratio)
                                 .children(shadow)
-                        })),
+                        }))
+                        // Shown, but not part of conviction.
+                        .child(
+                            div()
+                                .flex()
+                                .flex_row()
+                                .gap_1()
+                                .child(label("context"))
+                                .children(report.factors.context().into_iter().map(
+                                    |(name, factor)| label(format!("{name} {}", factor.score)),
+                                )),
+                        ),
                 )
                 .children(self.render_conviction_history())
                 .child(
