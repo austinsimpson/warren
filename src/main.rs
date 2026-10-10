@@ -22,9 +22,9 @@ use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use chrono::Utc;
 use gpui::{
-    App, Bounds, Context, Div, ElementId, Entity, FontWeight, SharedString, Stateful, Subscription,
-    TitlebarOptions, Window, WindowBounds, WindowOptions, div, point, prelude::*, px, rgb, size,
-    transparent_black,
+    App, Bounds, Context, Div, ElementId, Entity, FontWeight, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, SharedString, Stateful, Subscription, TitlebarOptions, Window,
+    WindowBounds, WindowOptions, div, point, prelude::*, px, rgb, size, transparent_black,
 };
 
 use autopilot_ui::AgentsState;
@@ -52,6 +52,10 @@ struct Warren {
     chart_status: SharedString,
     /// Bumped per chart request so a slow, superseded response is dropped.
     chart_generation: u64,
+    /// The pointer over the chart: a hovered bar, or a drag between two.
+    pointer: chart::Pointer,
+    /// The chart's painted bounds, for mapping the pointer to a bar.
+    chart_bounds: chart::ChartBounds,
     portfolio: Portfolio,
     /// One runtime per user-created agent (strategy).
     agents: Vec<AgentsState>,
@@ -97,6 +101,8 @@ impl Warren {
             bars: Vec::new(),
             chart_status: "".into(),
             chart_generation: 0,
+            pointer: Default::default(),
+            chart_bounds: Default::default(),
             portfolio: Portfolio::default(),
             agents,
             selected_agent: 0,
@@ -175,6 +181,7 @@ impl Warren {
         self.chart_generation += 1;
         let generation = self.chart_generation;
         self.bars.clear();
+        self.pointer = Default::default();
         self.chart_status = "Loading…".into();
         cx.notify();
 
@@ -308,36 +315,100 @@ impl Warren {
             .on_click(cx.listener(move |this, _, _, cx| this.select(symbol.clone(), cx)))
     }
 
+    /// Track the pointer over the chart: hover, and the drag while the
+    /// left button is down.
+    fn chart_pointer_moved(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) {
+        let Some(bounds) = self.chart_bounds.get() else {
+            return;
+        };
+        let bar = chart::bar_at(bounds, self.bars.len(), event.position.x);
+        let drag = match (self.pointer.drag, bar, event.pressed_button) {
+            (Some((anchor, _)), Some(bar), Some(MouseButton::Left)) => Some((anchor, bar)),
+            _ => None,
+        };
+        let pointer = chart::Pointer { hover: bar, drag };
+        if pointer != self.pointer {
+            self.pointer = pointer;
+            cx.notify();
+        }
+    }
+
     fn render_chart_panel(&self, cx: &mut Context<Self>) -> Div {
         let first = self.bars.first();
         let last = self.bars.last();
         let range_change = first
             .zip(last)
             .map(|(first, last)| (last.close - first.close) / first.close * 100.0);
-        let (change_text, change_color) = format_change(range_change);
         let line_color = match range_change {
             Some(c) if c < 0.0 => RED,
             _ => GREEN,
         };
+
+        // Like Apple Stocks: dragging shows the change between two points,
+        // hovering shows the price at one, and otherwise the latest.
+        let bar = |i: usize| self.bars.get(i);
+        let (price, change, when) = match (self.pointer.drag, self.pointer.hover) {
+            (Some((a, b)), _) if a != b => {
+                let (lo, hi) = (a.min(b), a.max(b));
+                match (bar(lo), bar(hi)) {
+                    (Some(lo), Some(hi)) => {
+                        let diff = hi.close - lo.close;
+                        (
+                            format!("{diff:+.2}"),
+                            Some(diff / lo.close * 100.0),
+                            Some(format!(
+                                "{} – {}",
+                                self.range.format_point(lo.timestamp),
+                                self.range.format_point(hi.timestamp)
+                            )),
+                        )
+                    }
+                    _ => (String::new(), None, None),
+                }
+            }
+            (_, Some(i)) => match (first, bar(i)) {
+                (Some(first), Some(at)) => (
+                    format!("{:.2}", at.close),
+                    Some((at.close - first.close) / first.close * 100.0),
+                    Some(self.range.format_point(at.timestamp)),
+                ),
+                _ => (String::new(), None, None),
+            },
+            _ => (
+                last.map_or(String::new(), |bar| format!("{:.2}", bar.close)),
+                range_change,
+                None,
+            ),
+        };
+        let (change_text, change_color) = format_change(change);
 
         let header = div()
             .flex()
             .flex_row()
             .items_baseline()
             .gap_2()
+            .min_w_0()
             .child(
                 div()
                     .text_size(px(TEXT_LG))
                     .font_weight(FontWeight::BOLD)
                     .child(self.selected.clone()),
             )
-            .child(last.map_or("".into(), |bar| format!("{:.2}", bar.close)))
+            .child(price)
             .child(
                 div()
                     .text_size(px(TEXT_SM))
                     .text_color(change_color)
                     .child(change_text),
-            );
+            )
+            .children(when.map(|when| {
+                div()
+                    .min_w_0()
+                    .truncate()
+                    .text_size(px(TEXT_SM))
+                    .text_color(rgb(MUTED))
+                    .child(when)
+            }));
 
         let range_buttons =
             div()
@@ -377,11 +448,47 @@ impl Warren {
                         .child(format!("H {high:.2}"))
                         .child(format!("L {low:.2}")),
                 )
-                .child(div().flex_1().child(chart::price_chart(
-                    closes,
-                    line_color,
-                    self.research_levels(),
-                )))
+                .child(
+                    div()
+                        .id("price-chart")
+                        .flex_1()
+                        .cursor_crosshair()
+                        .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
+                            this.chart_pointer_moved(event, cx)
+                        }))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, event: &MouseDownEvent, _, cx| {
+                                if let Some(bounds) = this.chart_bounds.get()
+                                    && let Some(bar) =
+                                        chart::bar_at(bounds, this.bars.len(), event.position.x)
+                                {
+                                    this.pointer.drag = Some((bar, bar));
+                                    cx.notify();
+                                }
+                            }),
+                        )
+                        .on_mouse_up(
+                            MouseButton::Left,
+                            cx.listener(|this, _: &MouseUpEvent, _, cx| {
+                                this.pointer.drag = None;
+                                cx.notify();
+                            }),
+                        )
+                        .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                            if !hovered {
+                                this.pointer = Default::default();
+                                cx.notify();
+                            }
+                        }))
+                        .child(chart::price_chart(
+                            closes,
+                            line_color,
+                            self.research_levels(),
+                            self.pointer,
+                            self.chart_bounds.clone(),
+                        )),
+                )
                 .child(
                     axis_text()
                         .justify_between()

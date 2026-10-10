@@ -64,6 +64,16 @@ impl ChartRange {
         bars
     }
 
+    /// Format a bar time for the hover readout, in local time.
+    pub fn format_point(self, time: DateTime<Utc>) -> String {
+        let local = time.with_timezone(&Local);
+        match self {
+            Self::Day => local.format("%-I:%M %p").to_string(),
+            Self::Week | Self::Month => local.format("%a %b %-d, %-I:%M %p").to_string(),
+            Self::Year => local.format("%a %b %-d, %Y").to_string(),
+        }
+    }
+
     /// Format a bar time for the axis labels, in local time.
     pub fn format_time(self, time: DateTime<Utc>) -> String {
         let local = time.with_timezone(&Local);
@@ -75,18 +85,45 @@ impl ChartRange {
     }
 }
 
+/// Where the pointer is on the chart, Apple Stocks style.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Pointer {
+    /// The bar under the pointer.
+    pub hover: Option<usize>,
+    /// While dragging, the bar the drag started on and the current one.
+    pub drag: Option<(usize, usize)>,
+}
+
+/// The chart's last painted bounds, shared with the view so it can map the
+/// pointer to a bar.
+pub type ChartBounds = std::rc::Rc<std::cell::Cell<Option<Bounds<Pixels>>>>;
+
+/// The bar nearest `x` on a chart of `bars` bars painted in `bounds`.
+pub fn bar_at(bounds: Bounds<Pixels>, bars: usize, x: Pixels) -> Option<usize> {
+    if bars < 2 {
+        return None;
+    }
+    let step = f32::from(bounds.size.width) / (bars - 1) as f32;
+    let i = (f32::from(x - bounds.left()) / step).round();
+    Some(i.clamp(0.0, (bars - 1) as f32) as usize)
+}
+
 /// A line chart of closing prices: faint gridlines, a dashed baseline at the
 /// first close, a gradient fill, and a marker on the latest price. The
 /// research target and stop, `levels`, are marked when they fall within the
-/// plotted range. Fills whatever space its parent gives it.
+/// plotted range. `pointer` adds a hover line and dot, or a shaded span while
+/// dragging. Fills whatever space its parent gives it.
 pub fn price_chart(
     closes: Vec<f64>,
     color: u32,
     levels: (Option<f64>, Option<f64>),
+    pointer: Pointer,
+    painted: ChartBounds,
 ) -> impl IntoElement {
     canvas(
         |_, _, _| {},
         move |bounds, _, window, _| {
+            painted.set(Some(bounds));
             let Some(plot) = Plot::new(&closes, bounds) else {
                 return;
             };
@@ -152,10 +189,40 @@ pub fn price_chart(
                 window.paint_path(path, rgb(color));
             }
 
-            for (radius, alpha) in [(6., 0.18), (3., 1.)] {
-                let r = px(radius);
-                let dot = Bounds::new(point(last.x - r, last.y - r), size(r * 2., r * 2.));
-                window.paint_quad(fill(dot, tint(color, alpha)).corner_radii(r));
+            let dot = |window: &mut gpui::Window, at: Point<Pixels>, alpha: f32| {
+                for (radius, a) in [(6., 0.18 * alpha), (3., alpha)] {
+                    let r = px(radius);
+                    let dot = Bounds::new(point(at.x - r, at.y - r), size(r * 2., r * 2.));
+                    window.paint_quad(fill(dot, tint(color, a)).corner_radii(r));
+                }
+            };
+            let rule = |window: &mut gpui::Window, x: Pixels| {
+                let mut line = PathBuilder::stroke(px(1.));
+                line.move_to(point(x, bounds.top()));
+                line.line_to(point(x, bounds.bottom()));
+                if let Ok(path) = line.build() {
+                    window.paint_path(path, tint(MUTED, 0.8));
+                }
+            };
+            match (pointer.drag, pointer.hover) {
+                (Some((a, b)), _) if a != b => {
+                    let (lo, hi) = (a.min(b), a.max(b));
+                    let (x0, x1) = (points[lo].x, points[hi].x);
+                    let up = closes[hi] >= closes[lo];
+                    let span =
+                        Bounds::from_corners(point(x0, bounds.top()), point(x1, bounds.bottom()));
+                    window.paint_quad(fill(span, tint(if up { GREEN } else { RED }, 0.10)));
+                    rule(window, x0);
+                    rule(window, x1);
+                    dot(window, points[lo], 1.);
+                    dot(window, points[hi], 1.);
+                }
+                (_, Some(i)) => {
+                    rule(window, points[i].x);
+                    dot(window, last, 0.35);
+                    dot(window, points[i], 1.);
+                }
+                _ => dot(window, last, 1.),
             }
         },
     )
@@ -217,6 +284,18 @@ mod tests {
             trade_count: 0,
             vwap: 1.0,
         }
+    }
+
+    #[test]
+    fn maps_the_pointer_to_the_nearest_bar() {
+        let bounds = Bounds::new(point(px(100.), px(0.)), size(px(400.), px(200.)));
+        // Five bars, 100px apart.
+        assert_eq!(super::bar_at(bounds, 5, px(100.)), Some(0));
+        assert_eq!(super::bar_at(bounds, 5, px(240.)), Some(1));
+        assert_eq!(super::bar_at(bounds, 5, px(260.)), Some(2));
+        assert_eq!(super::bar_at(bounds, 5, px(900.)), Some(4));
+        assert_eq!(super::bar_at(bounds, 5, px(0.)), Some(0));
+        assert_eq!(super::bar_at(bounds, 1, px(150.)), None);
     }
 
     #[test]
