@@ -650,26 +650,49 @@ fn main() {
         return;
     }
 
-    gpui_platform::application().run(|cx: &mut App| {
+    let app = gpui_platform::application();
+    // Closing the window leaves the agents running (macOS apps don't quit on
+    // last window close); clicking the dock icon brings the window back.
+    app.on_reopen(|cx| {
+        if cx.windows().is_empty()
+            && let Some(view) = cx.try_global::<MainView>().map(|v| v.0.clone())
+        {
+            open_main_window(view, cx);
+        }
+    });
+    app.run(|cx: &mut App| {
         if let Err(err) = theme::load_fonts(cx) {
             eprintln!("failed to load bundled fonts: {err:#}");
         }
         text_input::bind_keys(cx);
-        let bounds = Bounds::centered(None, size(px(1200.), px(760.)), cx);
-        cx.open_window(
-            WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(bounds)),
-                window_min_size: Some(size(px(900.), px(560.))),
-                titlebar: Some(TitlebarOptions {
-                    title: Some("Warren".into()),
-                    appears_transparent: true,
-                    traffic_light_position: Some(point(px(12.), px((HEADER_HEIGHT - 14.) / 2.))),
-                }),
-                ..Default::default()
-            },
-            |_, cx| cx.new(Warren::new),
-        )
-        .unwrap();
-        cx.activate(true);
+        // One view for the app's lifetime, so the agents it starts outlive
+        // its window and reopening doesn't start them twice.
+        let view = cx.new(Warren::new);
+        cx.set_global(MainView(view.clone()));
+        open_main_window(view, cx);
     });
+}
+
+/// The app's single view, kept alive while its window is closed.
+struct MainView(Entity<Warren>);
+
+impl gpui::Global for MainView {}
+
+fn open_main_window(view: Entity<Warren>, cx: &mut App) {
+    let bounds = Bounds::centered(None, size(px(1200.), px(760.)), cx);
+    cx.open_window(
+        WindowOptions {
+            window_bounds: Some(WindowBounds::Windowed(bounds)),
+            window_min_size: Some(size(px(900.), px(560.))),
+            titlebar: Some(TitlebarOptions {
+                title: Some("Warren".into()),
+                appears_transparent: true,
+                traffic_light_position: Some(point(px(12.), px((HEADER_HEIGHT - 14.) / 2.))),
+            }),
+            ..Default::default()
+        },
+        |_, _| view,
+    )
+    .unwrap();
+    cx.activate(true);
 }

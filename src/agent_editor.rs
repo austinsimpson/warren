@@ -421,12 +421,6 @@ impl Render for AgentEditor {
             .child(row("Budget ($)", self.budget.clone()))
             .children(unallocated.map(|u| row("", label(u))))
             .child(row("Model", segmented(model_choices)))
-            .child(row(
-                "Start",
-                toggle("autostart", d.autostart, "run automatically at launch").on_click(
-                    cx.listener(|this, _, _, cx| this.update(cx, |s| s.autostart = !s.autostart)),
-                ),
-            ))
             .child(section("risk"))
             .child(row("Tolerance", segmented(risk_choices)))
             .child(row("", label(preset_note)))

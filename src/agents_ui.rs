@@ -64,8 +64,17 @@ impl Warren {
 
     /// Persist `strategy`, then start it (new) or hand its autopilot the new
     /// settings (edited).
-    fn save_agent(&mut self, strategy: Strategy, cx: &mut Context<Self>) {
+    fn save_agent(&mut self, mut strategy: Strategy, cx: &mut Context<Self>) {
         let is_new = self.editor.as_ref().is_some_and(|(_, _, new)| *new);
+        // Whether the agent runs is the AUTO switch's to say, not the form's,
+        // which may predate a flip of it.
+        if let Some(agent) = self
+            .agents
+            .iter()
+            .find(|a| a.ctx.strategy.id == strategy.id)
+        {
+            strategy.autostart = !agent.paused();
+        }
         let result = (|| -> anyhow::Result<()> {
             let home = self
                 .home

@@ -28,7 +28,8 @@ pub struct Strategy {
     pub id: String,
     pub name: String,
     pub created_at: DateTime<Utc>,
-    /// Start running at launch; otherwise it starts paused.
+    /// Whether the agent is switched on (AUTO). It comes back the same way
+    /// at launch.
     #[serde(default)]
     pub autostart: bool,
     /// Dollars of the paper account this strategy may invest.

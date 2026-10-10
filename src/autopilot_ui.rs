@@ -212,19 +212,44 @@ impl Warren {
 
     fn toggle_autopilot(&mut self, cx: &mut Context<Self>) {
         if let Some(agents) = self.agent() {
-            Autopilot::set_paused(&agents.ctx, &agents.control, !agents.paused());
-            cx.notify();
+            let paused = agents.paused();
+            self.set_running(paused, cx);
         }
     }
 
     fn run_cycle_now(&mut self, cx: &mut Context<Self>) {
+        self.set_running(true, cx);
         if let Some(agents) = self.agent() {
-            if agents.paused() {
-                Autopilot::set_paused(&agents.ctx, &agents.control, false);
-            }
             agents.control.run_now();
-            cx.notify();
         }
+    }
+
+    /// Switch the selected agent on or off, and remember it so the agent
+    /// comes back the same way at the next launch.
+    fn set_running(&mut self, running: bool, cx: &mut Context<Self>) {
+        let Some(agents) = self.agents.get_mut(self.selected_agent) else {
+            return;
+        };
+        Autopilot::set_paused(&agents.ctx, &agents.control, !running);
+        if agents.ctx.strategy.autostart != running {
+            let mut strategy = (*agents.ctx.strategy).clone();
+            strategy.autostart = running;
+            let saved = match &self.home {
+                Some(home) => home.strategies.save(&strategy),
+                None => Err(anyhow::anyhow!("agents are unavailable")),
+            };
+            match saved {
+                Ok(()) => {
+                    let strategy = Arc::new(strategy);
+                    agents.ctx.strategy = strategy.clone();
+                    agents.control.update(strategy, agents.ctx.config.clone());
+                }
+                Err(err) => {
+                    self.agents_error = Some(format!("Saving agent failed: {err:#}").into())
+                }
+            }
+        }
+        cx.notify();
     }
 
     /// Run/pause switch, run-now, and the daily run budget.
