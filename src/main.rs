@@ -25,8 +25,9 @@ use std::{collections::HashMap, sync::Arc, time::Duration};
 use chrono::Utc;
 use gpui::{
     App, Bounds, Context, Div, ElementId, Entity, FontWeight, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, SharedString, Stateful, Subscription, TitlebarOptions, Window,
-    WindowBounds, WindowOptions, div, point, prelude::*, px, rgb, size, transparent_black,
+    MouseMoveEvent, MouseUpEvent, Pixels, Point, SharedString, Stateful, Subscription,
+    TitlebarOptions, Window, WindowBounds, WindowOptions, div, point, prelude::*, px, rgb, size,
+    transparent_black,
 };
 
 use autopilot_ui::AgentsState;
@@ -62,6 +63,9 @@ struct Warren {
     pointer: chart::Pointer,
     /// The chart's painted bounds, for mapping the pointer to a bar.
     chart_bounds: chart::ChartBounds,
+    /// The cursor's position over the chart, relative to its bounds, for
+    /// placing the price tooltip.
+    chart_cursor: Option<Point<Pixels>>,
     portfolio: Portfolio,
     /// One runtime per user-created agent (strategy).
     agents: Vec<AgentsState>,
@@ -111,6 +115,7 @@ impl Warren {
             exploration_open: false,
             pointer: Default::default(),
             chart_bounds: Default::default(),
+            chart_cursor: None,
             portfolio: Portfolio::default(),
             agents,
             selected_agent: 0,
@@ -353,11 +358,9 @@ impl Warren {
             (Some((anchor, _)), Some(bar), Some(MouseButton::Left)) => Some((anchor, bar)),
             _ => None,
         };
-        let pointer = chart::Pointer { hover: bar, drag };
-        if pointer != self.pointer {
-            self.pointer = pointer;
-            cx.notify();
-        }
+        self.pointer = chart::Pointer { hover: bar, drag };
+        self.chart_cursor = Some(event.position - bounds.origin);
+        cx.notify();
     }
 
     fn render_chart_panel(&self, cx: &mut Context<Self>) -> Div {
@@ -408,6 +411,15 @@ impl Warren {
             ),
         };
         let (change_text, change_color) = format_change(change);
+        // What the tooltip by the cursor shows: the hovered price, or the
+        // change across a drag.
+        let tooltip = self.pointer.hover.and(self.chart_cursor).map(|cursor| {
+            let value = match self.pointer.drag {
+                Some((a, b)) if a != b => change_text.clone(),
+                _ => price.clone(),
+            };
+            (cursor, value, when.clone())
+        });
 
         let header = div()
             .flex()
@@ -478,6 +490,7 @@ impl Warren {
                 .child(
                     div()
                         .id("price-chart")
+                        .relative()
                         .flex_1()
                         .cursor_crosshair()
                         .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
@@ -505,6 +518,7 @@ impl Warren {
                         .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
                             if !hovered {
                                 this.pointer = Default::default();
+                                this.chart_cursor = None;
                                 cx.notify();
                             }
                         }))
@@ -514,7 +528,10 @@ impl Warren {
                             self.research_levels(),
                             self.pointer,
                             self.chart_bounds.clone(),
-                        )),
+                        ))
+                        .children(tooltip.map(|(cursor, value, when)| {
+                            chart_tooltip(cursor, value, when, self.chart_bounds.get())
+                        })),
                 )
                 .child(
                     axis_text()
@@ -671,6 +688,57 @@ fn main() {
         cx.set_global(MainView(view.clone()));
         open_main_window(view, cx);
     });
+}
+
+/// The price (or change) by the cursor, flipped to its left near the
+/// chart's right edge and below it near the top.
+fn chart_tooltip(
+    cursor: Point<Pixels>,
+    value: String,
+    when: Option<String>,
+    bounds: Option<Bounds<Pixels>>,
+) -> Div {
+    const OFFSET: f32 = 12.;
+    const WIDTH: f32 = 150.;
+    const HEIGHT: f32 = 40.;
+    let width = bounds.map_or(px(f32::MAX), |b| b.size.width);
+    let left = if cursor.x + px(OFFSET + WIDTH) > width {
+        cursor.x - px(OFFSET + WIDTH)
+    } else {
+        cursor.x + px(OFFSET)
+    };
+    let top = if cursor.y > px(OFFSET + HEIGHT) {
+        cursor.y - px(OFFSET + HEIGHT)
+    } else {
+        cursor.y + px(OFFSET)
+    };
+    div()
+        .absolute()
+        .left(left)
+        .top(top)
+        .w(px(WIDTH))
+        .flex()
+        .flex_col()
+        .when(cursor.x + px(OFFSET + WIDTH) > width, |d| d.items_end())
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .px_2()
+                .py_1()
+                .rounded_sm()
+                .border_1()
+                .border_color(rgb(BORDER))
+                .bg(rgb(SELECTED))
+                .shadow_md()
+                .child(div().font_weight(FontWeight::BOLD).child(value))
+                .children(when.map(|when| {
+                    div()
+                        .text_size(px(TEXT_XS))
+                        .text_color(rgb(MUTED))
+                        .child(when)
+                })),
+        )
 }
 
 /// The app's single view, kept alive while its window is closed.
