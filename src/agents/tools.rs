@@ -10,7 +10,7 @@ use rig_core::schemars::{self, JsonSchema};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use super::{AgentCtx, executor, technicals};
+use super::{AgentCtx, executor, research::TrendHealth, technicals};
 use crate::market::alpaca::{NewOrder, OrderSide, Timeframe};
 use crate::store::JournalEntry;
 
@@ -392,6 +392,7 @@ impl ListResearch {
                     "stop_loss": r.findings.stop_loss,
                     "horizon_days": r.findings.horizon_days,
                     "age_hours": (Utc::now() - r.generated_at).num_hours(),
+                    "trend_health": r.trend_health,
                     "context": r
                         .factors
                         .context()
@@ -575,6 +576,16 @@ impl PlaceOrder {
             .and_then(|s| s.last_price())
             .ok_or_else(|| ToolExecutionError::not_found(format!("no price for {symbol}")))?;
         let report = ctx.store.report(&symbol).map_err(failed)?;
+        // Judged on today's bars, not the report's, which can be a day old.
+        let trend_health = match side {
+            OrderSide::Buy => alpaca
+                .daily_history(&symbol, Utc::now() - Duration::days(550))
+                .await
+                .ok()
+                .and_then(|bars| technicals::compute(&bars))
+                .map(|t| TrendHealth::from_technicals(&t)),
+            OrderSide::Sell => None,
+        };
 
         let proposal = executor::Proposal {
             side,
@@ -594,6 +605,7 @@ impl PlaceOrder {
                 rating: r.rating,
                 conviction: r.conviction,
                 entry_high: r.findings.entry_high,
+                trend_health,
             }),
         };
         executor::check_risk(&proposal, &ctx.config.executor)

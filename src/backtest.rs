@@ -780,6 +780,10 @@ fn report(observations: &[Observation], universe: &str, horizon: usize) -> Strin
                 |o| o.quintiles[k] == 1
             )
         );
+        if let Some((q1, q5)) = typical_cutoffs(observations, k) {
+            out +=
+                &format!("  cutoffs    Q1 below ~{q1:.3}, Q5 above ~{q5:.3} (median over dates)\n");
+        }
     }
 
     out += &format!("\nquant conviction\n{BUCKET_HEADER}");
@@ -874,6 +878,33 @@ fn report(observations: &[Observation], universe: &str, horizon: usize) -> Strin
     );
     out += &format!("{:<17} {}\n", "  SPY", curve_stats(&spy, years, horizon));
     out
+}
+
+/// The values where indicator `k`'s bottom and top quintiles typically
+/// begin: the 20th and 80th percentiles on each date, medianed over dates.
+/// These turn a cross-sectional ranking into fixed thresholds live code can
+/// apply to one stock at a time.
+fn typical_cutoffs(observations: &[Observation], k: usize) -> Option<(f64, f64)> {
+    let mut low = Vec::new();
+    let mut high = Vec::new();
+    for (_, obs) in by_period(observations) {
+        let mut values: Vec<f64> = obs
+            .iter()
+            .map(|o| o.indicators[k])
+            .filter(|v| v.is_finite())
+            .collect();
+        if values.len() < 5 {
+            continue;
+        }
+        values.sort_by(f64::total_cmp);
+        low.push(values[values.len() / 5]);
+        high.push(values[values.len() * 4 / 5]);
+    }
+    let median = |mut v: Vec<f64>| {
+        v.sort_by(f64::total_cmp);
+        v.get(v.len() / 2).copied()
+    };
+    Some((median(low)?, median(high)?))
 }
 
 /// `spread` over all dates and each half of them.

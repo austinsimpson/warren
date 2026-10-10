@@ -12,7 +12,7 @@ use super::{
     AgentCtx, AgentKind,
     jev::ShadowScores,
     scoring::{self, FactorScores, JudgedFactors, QuantFactors},
-    technicals,
+    technicals::{self, Technicals},
     tools::*,
 };
 use std::future::IntoFuture;
@@ -84,6 +84,25 @@ pub struct ResearchFindings {
 ///   since conviction is computed from the factors they stored.
 pub const SCORING_VERSION: u32 = 2;
 
+/// How broken a stock's long-run trend is. Among stocks like the ones
+/// exploration screens, those far below their 52-week high or down over
+/// the past year (skipping the last month) kept lagging; see `backtest`.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct TrendHealth {
+    pub percent_below_52w_high: f64,
+    /// `None` with under about a year of history.
+    pub return_12_1_percent: Option<f64>,
+}
+
+impl TrendHealth {
+    pub fn from_technicals(t: &Technicals) -> Self {
+        Self {
+            percent_below_52w_high: t.percent_below_52w_high,
+            return_12_1_percent: t.return_12_1_percent,
+        }
+    }
+}
+
 impl ResearchReport {
     /// Rescore a report from an older scoring version whose factors carry
     /// over, so its conviction is on today's scale. Others are unchanged.
@@ -115,6 +134,10 @@ pub struct ResearchReport {
     pub risk_reward: Option<f64>,
     /// Every factor behind the conviction, computed and judged.
     pub factors: FactorScores,
+    /// Long-run price health the executor's buy vetoes check; absent on
+    /// reports written before it was recorded.
+    #[serde(default)]
+    pub trend_health: Option<TrendHealth>,
     /// Jev's scores for the same judgment factors, recorded for comparison.
     /// They do not affect conviction.
     #[serde(default)]
@@ -146,8 +169,10 @@ independently of the others and of your overall view: 1 = clearly bearish, \
 5 = clearly bullish. Use the full range when the data supports it; a 3 \
 should mean the evidence is genuinely mixed or absent. Give each score a \
 one-sentence reason citing the data. Warren computes conviction and the \
-rating from all factors plus the reward-to-risk of your entry, target, and \
-stop, so set those levels honestly.
+rating from your three scores, extension, and the reward-to-risk of your \
+entry, target, and stop, so set those levels honestly. Trend, momentum, and \
+relative strength are context: useful for reading the chart, but not part \
+of conviction.
 
 Levels:
 - For a long setup, give an entry range, a target, and a stop below entry. \
@@ -164,7 +189,7 @@ pub async fn run(ctx: &AgentCtx, symbol: &str) -> Result<ResearchReport> {
     let symbol = symbol.trim().to_uppercase();
     let config = &ctx.config.research.agent;
     ctx.recorded(AgentKind::Research, Some(&symbol), async |ctx| {
-        let quant = compute_quant_factors(ctx, &symbol).await?;
+        let (quant, trend_health) = compute_quant_factors(ctx, &symbol).await?;
         let agent = ctx
             .builder(AgentKind::Research, Some(&symbol), config, PREAMBLE.into())?
             .tool(GetAsset(ctx.clone()))
@@ -206,6 +231,7 @@ pub async fn run(ctx: &AgentCtx, symbol: &str) -> Result<ResearchReport> {
             risk_reward: scored.risk_reward,
             factors,
             shadow,
+            trend_health: Some(trend_health),
             findings,
         };
         ctx.store.save_report(&report)?;
@@ -235,7 +261,11 @@ pub async fn run(ctx: &AgentCtx, symbol: &str) -> Result<ResearchReport> {
 
 /// Trend, momentum, and relative strength from about 18 months of daily
 /// bars for the stock and the benchmark.
-async fn compute_quant_factors(ctx: &AgentCtx, symbol: &str) -> Result<QuantFactors> {
+/// The computed factors and trend health for `symbol`.
+async fn compute_quant_factors(
+    ctx: &AgentCtx,
+    symbol: &str,
+) -> Result<(QuantFactors, TrendHealth)> {
     let start = Utc::now() - chrono::Duration::days(550);
     let (stock, benchmark) = tokio::try_join!(
         ctx.alpaca.daily_history(symbol, start),
@@ -243,7 +273,10 @@ async fn compute_quant_factors(ctx: &AgentCtx, symbol: &str) -> Result<QuantFact
     )?;
     let stock = technicals::compute(&stock).ok_or_else(|| anyhow!("no daily bars for {symbol}"))?;
     let benchmark = technicals::compute(&benchmark);
-    Ok(scoring::quant_factors(&stock, benchmark.as_ref()))
+    Ok((
+        scoring::quant_factors(&stock, benchmark.as_ref()),
+        TrendHealth::from_technicals(&stock),
+    ))
 }
 
 /// Jev's catalyst and news scores from the last two weeks of headlines, or

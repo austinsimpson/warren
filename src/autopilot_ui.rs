@@ -276,7 +276,8 @@ impl Warren {
 
     /// Rating, conviction, levels, and thesis for the selected symbol.
     pub fn render_research_card(&self) -> Option<Div> {
-        let report = self.agents.as_ref()?.reports.get(&self.selected)?;
+        let agents = self.agents.as_ref()?;
+        let report = agents.reports.get(&self.selected)?;
         let f = &report.findings;
         let color = rating_color(report.rating);
         let level = |name: &'static str, value: Option<f64>| {
@@ -397,7 +398,29 @@ impl Warren {
                                 .children(report.factors.context().into_iter().map(
                                     |(name, factor)| label(format!("{name} {}", factor.score)),
                                 )),
-                        ),
+                        )
+                        .children(report.trend_health.map(|health| {
+                            // Red when the executor would refuse to buy.
+                            let vetoed = crate::agents::executor::check_trend_health(
+                                Some(health),
+                                &agents.ctx.config.executor,
+                            )
+                            .is_err();
+                            let text = format!(
+                                "52w high -{:.0}%{}",
+                                health.percent_below_52w_high,
+                                health
+                                    .return_12_1_percent
+                                    .map_or(String::new(), |r| format!(" · 12-1m {r:+.0}%")),
+                            );
+                            div()
+                                .text_color(if vetoed { rgb(RED) } else { rgb(MUTED) })
+                                .child(if vetoed {
+                                    format!("{text} · no buys")
+                                } else {
+                                    text
+                                })
+                        })),
                 )
                 .children(self.render_conviction_history())
                 .child(

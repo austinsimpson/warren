@@ -436,6 +436,7 @@ mod tests {
             return_1m_percent: Some(6.0),
             return_3m_percent: Some(12.0),
             return_1y_percent: Some(30.0),
+            return_12_1_percent: Some(25.0),
             volatility_3m_percent: Some(25.0),
             high_52w: 101.0,
             low_52w: 70.0,

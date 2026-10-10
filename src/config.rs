@@ -138,6 +138,13 @@ pub struct ExecutorConfig {
     pub allow_short: bool,
     /// Minimum research conviction (0–1) required to open a new position.
     pub min_conviction_to_buy: f64,
+    /// Refuse buys further than this below the 52-week high. Among names
+    /// like exploration's, the bottom fifth (about 44% or more below) kept
+    /// lagging in backtests.
+    pub max_percent_below_52w_high: f64,
+    /// Refuse buys whose 12-1 month return is below this. The bottom fifth
+    /// (about −22% or worse) kept lagging in backtests.
+    pub min_return_12_1_percent: f64,
 }
 
 impl Default for ExecutorConfig {
@@ -150,6 +157,8 @@ impl Default for ExecutorConfig {
             min_cash_percent: 10.0,
             allow_short: false,
             min_conviction_to_buy: 0.6,
+            max_percent_below_52w_high: 45.0,
+            min_return_12_1_percent: -20.0,
         }
     }
 }

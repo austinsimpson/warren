@@ -399,6 +399,7 @@ pub(crate) mod test_support {
                 risk_reward: None,
             },
             shadow: None,
+            trend_health: None,
             findings: research::ResearchFindings {
                 horizon_days: 10,
                 thesis: String::new(),

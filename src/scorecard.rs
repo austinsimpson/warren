@@ -212,7 +212,7 @@ fn score(report: &ResearchReport, name: &str) -> Option<f64> {
         .map(|(_, f)| f64::from(f.score))
 }
 
-const FACTOR_DEFS: [FactorDef; 11] = [
+const FACTOR_DEFS: [FactorDef; 13] = [
     FactorDef {
         name: "conviction",
         value: |r| Some(r.conviction),
@@ -266,6 +266,19 @@ const FACTOR_DEFS: [FactorDef; 11] = [
         value: |r| score(r, "r/r"),
         high: 4.0,
         low: 2.0,
+    },
+    FactorDef {
+        name: "12-1m return",
+        value: |r| r.trend_health?.return_12_1_percent,
+        high: 20.0,
+        low: -20.0,
+    },
+    FactorDef {
+        // Negated, so higher is closer to the high like the other factors.
+        name: "near 52w high",
+        value: |r| r.trend_health.map(|h| -h.percent_below_52w_high),
+        high: -10.0,
+        low: -45.0,
     },
     FactorDef {
         name: "jev catalyst",

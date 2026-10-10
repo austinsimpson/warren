@@ -5,7 +5,11 @@
 use anyhow::{Result, anyhow};
 use chrono::Utc;
 
-use super::{AgentCtx, AgentKind, research::Rating, tools::*};
+use super::{
+    AgentCtx, AgentKind,
+    research::{Rating, TrendHealth},
+    tools::*,
+};
 use crate::config::ExecutorConfig;
 use crate::market::alpaca::OrderSide;
 
@@ -36,6 +40,8 @@ pub struct ResearchView {
     pub conviction: f64,
     /// Top of the report's entry range: buys may not be priced above it.
     pub entry_high: Option<f64>,
+    /// Computed from current bars when the order is placed.
+    pub trend_health: Option<TrendHealth>,
 }
 
 /// Enforce the risk limits. The error explains which limit the order would
@@ -78,6 +84,7 @@ pub fn check_risk(p: &Proposal, limits: &ExecutorConfig) -> Result<(), String> {
                     ));
                 }
                 check_entry(p, research.entry_high)?;
+                check_trend_health(research.trend_health, limits)?;
             }
             let position_after = (p.held_qty.max(0.0) + p.qty as f64) * p.price;
             let max_position = limits.max_position_percent / 100.0 * p.equity;
@@ -129,6 +136,34 @@ fn check_entry(p: &Proposal, entry_high: Option<f64>) -> Result<(), String> {
     }
 }
 
+/// Buys must not be in a broken long-run trend, and are refused when it
+/// can't be checked.
+pub fn check_trend_health(
+    health: Option<TrendHealth>,
+    limits: &ExecutorConfig,
+) -> Result<(), String> {
+    let Some(health) = health else {
+        return Err("no daily price history to check its long-run trend; buys need it".into());
+    };
+    if health.percent_below_52w_high > limits.max_percent_below_52w_high {
+        return Err(format!(
+            "it trades {:.0}% below its 52-week high; buys need it within {:.0}% (stocks this \
+             far down have kept lagging)",
+            health.percent_below_52w_high, limits.max_percent_below_52w_high
+        ));
+    }
+    if let Some(r) = health.return_12_1_percent
+        && r < limits.min_return_12_1_percent
+    {
+        return Err(format!(
+            "its 12-1 month return is {r:.0}%; buys need at least {:.0}% (stocks with \
+             weak 12-month momentum have kept lagging)",
+            limits.min_return_12_1_percent
+        ));
+    }
+    Ok(())
+}
+
 fn preamble(ctx: &AgentCtx) -> Result<String> {
     let limits = &ctx.config.executor;
     let lessons = ctx.store.lessons()?;
@@ -177,6 +212,9 @@ Hard limits (place_order enforces these and refuses violations):
   limit at or below it, or a market order only when the price is already \
   inside or below it. Do not chase; if the price is above the range, place \
   a resting limit order or wait.
+- No buys more than {max_below:.0}% below the 52-week high or with a 12-1 \
+  month return below {min_mom:.0}% (the report's trend_health); these \
+  broken trends kept lagging in backtests.
 - Buys need research rated buy/strong_buy with conviction >= {min_conv:.2}. \
   Conviction is computed from catalyst, news sentiment, setup quality, \
   extension, and reward-to-risk (0 = very bearish, 0.5 = neutral, 1 = very \
@@ -201,6 +239,8 @@ Lessons from your past decisions:
             "is disabled"
         },
         min_conv = limits.min_conviction_to_buy,
+        max_below = limits.max_percent_below_52w_high,
+        min_mom = limits.min_return_12_1_percent,
     ))
 }
 
@@ -255,6 +295,7 @@ mod tests {
                 rating: Rating::Buy,
                 conviction: 0.7,
                 entry_high: Some(price),
+                trend_health: Some(HEALTHY),
             }),
         }
     }
@@ -264,7 +305,46 @@ mod tests {
             rating,
             conviction,
             entry_high: Some(1_000.0),
+            trend_health: Some(HEALTHY),
         })
+    }
+
+    const HEALTHY: TrendHealth = TrendHealth {
+        percent_below_52w_high: 5.0,
+        return_12_1_percent: Some(20.0),
+    };
+
+    #[test]
+    fn refuses_buys_in_broken_trends() {
+        let limits = ExecutorConfig::default();
+        let with = |health: Option<TrendHealth>| {
+            let mut p = buy(10, 100.0);
+            p.research.as_mut().unwrap().trend_health = health;
+            check_risk(&p, &limits)
+        };
+        assert!(with(Some(HEALTHY)).is_ok());
+        let far_below = TrendHealth {
+            percent_below_52w_high: 50.0,
+            ..HEALTHY
+        };
+        assert!(with(Some(far_below)).unwrap_err().contains("52-week high"));
+        let weak = TrendHealth {
+            return_12_1_percent: Some(-30.0),
+            ..HEALTHY
+        };
+        assert!(with(Some(weak)).unwrap_err().contains("12-1 month"));
+        let young = TrendHealth {
+            return_12_1_percent: None,
+            ..HEALTHY
+        };
+        assert!(with(Some(young)).is_ok());
+        assert!(with(None).unwrap_err().contains("price history"));
+        // Sells are never vetoed.
+        let mut sell = buy(10, 100.0);
+        sell.side = OrderSide::Sell;
+        sell.held_qty = 10.0;
+        sell.research.as_mut().unwrap().trend_health = Some(far_below);
+        assert!(check_risk(&sell, &limits).is_ok());
     }
 
     #[test]

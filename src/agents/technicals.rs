@@ -27,6 +27,9 @@ pub struct Technicals {
     pub return_1m_percent: Option<f64>,
     pub return_3m_percent: Option<f64>,
     pub return_1y_percent: Option<f64>,
+    /// Twelve months to one month ago, the classic momentum measure; it
+    /// skips the last month, where short-term reversal dominates.
+    pub return_12_1_percent: Option<f64>,
     /// Annualized standard deviation of daily returns over the last 3 months.
     pub volatility_3m_percent: Option<f64>,
     pub high_52w: f64,
@@ -65,6 +68,10 @@ pub fn compute(bars: &[Bar]) -> Option<Technicals> {
         return_1m_percent: period_return(&closes, MONTH),
         return_3m_percent: period_return(&closes, QUARTER),
         return_1y_percent: period_return(&closes, YEAR),
+        return_12_1_percent: closes
+            .len()
+            .checked_sub(MONTH + 1)
+            .and_then(|end| period_return(&closes[..=end], YEAR - MONTH)),
         volatility_3m_percent: volatility(&closes, QUARTER),
         high_52w,
         low_52w,
