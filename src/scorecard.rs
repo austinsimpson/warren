@@ -22,7 +22,7 @@ use crate::store::{JournalEntry, RunRecord, Store};
 use crate::strategy::{Strategies, Strategy};
 
 /// Trading days after a report at which its factors are checked.
-pub const HORIZONS: [usize; 3] = [5, 10, 21];
+pub const HORIZONS: [usize; 4] = [5, 10, 21, 63];
 /// Fewer matured reports than this and a factor's correlation is noise.
 pub const MIN_SAMPLE: usize = 20;
 
@@ -216,7 +216,7 @@ fn score(report: &ResearchReport, name: &str) -> Option<f64> {
         .map(|(_, f)| f64::from(f.score))
 }
 
-const FACTOR_DEFS: [FactorDef; 13] = [
+const FACTOR_DEFS: [FactorDef; 15] = [
     FactorDef {
         // Whether research proposed a long setup at all (1) or not (0).
         name: "long setup",
@@ -290,6 +290,19 @@ const FACTOR_DEFS: [FactorDef; 13] = [
         value: |r| r.trend_health.map(|h| -h.percent_below_52w_high),
         high: -10.0,
         low: -45.0,
+    },
+    FactorDef {
+        name: "revenue growth",
+        value: |r| r.fundamentals?.metrics.revenue_growth_percent,
+        high: 20.0,
+        low: 0.0,
+    },
+    FactorDef {
+        // Negated, so higher is cheaper like the other factors' "better".
+        name: "cheap (p/s)",
+        value: |r| r.fundamentals?.price_to_sales.map(|p| -p),
+        high: -1.5,
+        low: -6.0,
     },
     FactorDef {
         name: "jev catalyst",

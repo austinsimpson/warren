@@ -41,6 +41,8 @@ pub struct Strategy {
     #[serde(default)]
     pub universe: Universe,
     #[serde(default)]
+    pub style: Style,
+    #[serde(default)]
     pub horizon: Horizon,
     #[serde(default)]
     pub schedule: StrategySchedule,
@@ -237,6 +239,29 @@ impl Universe {
     }
 }
 
+/// How the agent looks for and holds stocks.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Style {
+    /// Setups with entries, targets, and stops over days to weeks.
+    #[default]
+    Swing,
+    /// Growing companies at reasonable prices, held for months while the
+    /// thesis holds; see `agents::scan` for the ranking that backs it.
+    Growth,
+}
+
+impl Style {
+    pub const ALL: [Self; 2] = [Self::Swing, Self::Growth];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Swing => "Swing",
+            Self::Growth => "Growth",
+        }
+    }
+}
+
 /// How long positions are meant to be held.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -314,6 +339,7 @@ impl Strategy {
             autostart: false,
             budget,
             risk: RiskTolerance::default(),
+            style: Style::default(),
             overrides: LimitOverrides::default(),
             universe: Universe::default(),
             horizon: Horizon::default(),
@@ -391,11 +417,13 @@ impl Strategy {
                 .join(", ")
         };
         let mut text = format!(
-            "\n\nThis agent: \"{name}\" ({risk} risk, holding periods of {horizon}).\n\
+            "\n\nThis agent: \"{name}\" ({style} style, {risk} risk, holding periods of \
+             {horizon}).\n\
              - Sectors: {sectors}.{foreign}{excluded}\n\
              - Universe: price at least ${min_price:.2}, 20-day average dollar volume at \
              least ${min_dv:.0}.",
             name = self.name,
+            style = self.style.label().to_lowercase(),
             risk = self.risk.label().to_lowercase(),
             horizon = self.horizon.describe(),
             foreign = if self.universe.allow_foreign {

@@ -139,9 +139,12 @@ const GROWTH_INDICATORS: [Indicator; 8] = [
     Indicator {
         name: "growth composite",
         expect: "revenue growth + acceleration + cheapness (price/sales, reversed) + 12-1 \
-                 momentum: highest best",
+                 momentum, among gross margins of 40%+: highest best",
     },
 ];
+
+/// Gross margin, in percent, below which the growth composite isn't scored.
+pub(crate) const MIN_GROWTH_GROSS_MARGIN: f64 = 40.0;
 
 /// Which indicators a run measures, and how to compute them.
 pub(crate) struct IndicatorSet<'a> {
@@ -198,7 +201,10 @@ impl<'a> IndicatorSet<'a> {
         let q = &obs.quintiles;
         if self.fundamentals.is_some() {
             // Growth, acceleration, cheapness, and momentum.
-            if [q[0], q[1], q[5], q[6]].iter().all(|&x| x > 0) {
+            // Only businesses with growth-company margins, so thin-margin
+            // cyclicals with commodity-driven revenue don't rank as growth.
+            let quality = obs.indicators[2] >= MIN_GROWTH_GROSS_MARGIN;
+            if quality && [q[0], q[1], q[5], q[6]].iter().all(|&x| x > 0) {
                 f64::from(q[0] + q[1] + (6 - q[5]) + q[6])
             } else {
                 f64::NAN

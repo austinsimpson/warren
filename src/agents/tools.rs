@@ -301,22 +301,53 @@ tool!(
     "scan_universe",
     ScanArgs,
     "Every liquid US stock this agent may buy, ranked by a composite that held up in \
-     backtests: 12-1 month momentum and nearness to the 52-week high (each as a quintile \
-     across the market) plus how calm the price is (extension; 5 = not stretched). \
-     Composite runs 3 to 15. Returns the top names with their price, 12-1 month return, \
-     distance below the 52-week high, extension score, 1-month return, dollar volume, and \
-     sector. The first call of the day can take a minute or two."
+     backtests for the agent's style. Swing: 12-1 month momentum and nearness to the \
+     52-week high (each a quintile across the market) plus how calm the price is \
+     (extension). Growth: revenue growth, growth acceleration, cheapness (price/sales), \
+     and 12-1 month momentum, each a quintile. Returns the top names with the figures \
+     behind the rank and their sector. The first call of the day can take a minute or two."
 );
 
 impl ScanUniverse {
     async fn run(&self, args: ScanArgs) -> ToolResult {
         let ctx = &self.0;
         let universe = &ctx.strategy.universe;
+        let n = args.top.clamp(1, 60) as usize;
+        if ctx.strategy.style == crate::strategy::Style::Growth {
+            let rows = scan::growth_scan(ctx, universe.min_price, universe.min_avg_dollar_volume)
+                .await
+                .map_err(failed)?;
+            let total = rows.len();
+            let top = scan::top_for_agent(ctx, &rows, |r| r.symbol.as_str(), n).await;
+            let ranked: Vec<Value> = top
+                .iter()
+                .map(|(r, sector)| {
+                    json!({
+                        "symbol": r.symbol,
+                        "price": round2(r.price),
+                        "composite": r.composite,
+                        "revenue_growth_percent": round2(r.revenue_growth_percent),
+                        "acceleration_points": round2(r.acceleration_points),
+                        "price_to_sales": round2(r.price_to_sales),
+                        "market_cap": r.market_cap.map(f64::round),
+                        "gross_margin_percent": r.gross_margin_percent.map(round2),
+                        "return_12_1_percent": round2(r.return_12_1_percent),
+                        "sector": sector,
+                    })
+                })
+                .collect();
+            return Ok(json!({
+                "ranking": "growth: revenue growth + acceleration + cheapness (price/sales) + \
+                            12-1 momentum, each a quintile; composite 4 to 20",
+                "stocks_ranked": total,
+                "top": ranked,
+            }));
+        }
         let rows = scan::scan(ctx, universe.min_price, universe.min_avg_dollar_volume)
             .await
             .map_err(failed)?;
         let total = rows.len();
-        let top = scan::top_for_agent(ctx, &rows, args.top.clamp(1, 60) as usize).await;
+        let top = scan::top_for_agent(ctx, &rows, |r| r.symbol.as_str(), n).await;
         let ranked: Vec<Value> = top
             .iter()
             .map(|(r, sector)| {
@@ -334,7 +365,9 @@ impl ScanUniverse {
             })
             .collect();
         Ok(json!({
-            "liquid_stocks_ranked": total,
+            "ranking": "swing: 12-1 momentum + near the 52-week high (quintiles) + extension; \
+                        composite 3 to 15",
+            "stocks_ranked": total,
             "top": ranked,
         }))
     }
@@ -517,6 +550,11 @@ impl ListResearch {
                         .map(|(name, f)| (name.to_string(), json!(f.score)))
                         .collect::<serde_json::Map<_, _>>(),
                     "top_risk": r.findings.risks.first(),
+                    "revenue_growth_percent": r
+                        .fundamentals
+                        .and_then(|f| f.metrics.revenue_growth_percent)
+                        .map(round2),
+                    "price_to_sales": r.fundamentals.and_then(|f| f.price_to_sales).map(round2),
                     "trend_health": r.trend_health,
                     "age_hours": (Utc::now() - r.generated_at).num_hours(),
                 })

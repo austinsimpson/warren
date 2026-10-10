@@ -29,6 +29,8 @@ pub const REVENUE_TAGS: [&str; 4] = [
     "SalesRevenueNet",
     "RevenueFromContractWithCustomerIncludingAssessedTax",
 ];
+/// Cost-of-revenue tags in order of preference.
+pub const COST_TAGS: [&str; 2] = ["CostOfRevenue", "CostOfGoodsAndServicesSold"];
 /// How long backtests wait before treating a quarter as public: 10-Qs are
 /// due within 40–45 days and 10-Ks within 60–90.
 pub const BACKTEST_LAG_DAYS: i64 = 90;
@@ -62,6 +64,9 @@ impl Fact {
 pub struct Series {
     pub revenue: Vec<Fact>,
     pub gross_profit: Vec<Fact>,
+    /// Cost of revenue, for gross profit where a filer doesn't report it.
+    #[serde(default)]
+    pub cost_of_revenue: Vec<Fact>,
     pub net_income: Vec<Fact>,
     /// Point-in-time share counts (no `start`).
     pub shares: Vec<Fact>,
@@ -149,7 +154,16 @@ fn ttm(series: &BTreeMap<NaiveDate, f64>, end: NaiveDate) -> Option<f64> {
 impl Series {
     pub fn metrics(&self, as_of: NaiveDate) -> GrowthMetrics {
         let revenue = quarterly(&self.revenue, as_of);
-        let gross = quarterly(&self.gross_profit, as_of);
+        let gross = if self.gross_profit.is_empty() {
+            // Revenue less cost of revenue, quarter by quarter.
+            let cost = quarterly(&self.cost_of_revenue, as_of);
+            revenue
+                .iter()
+                .filter_map(|(end, rev)| Some((*end, rev - cost.get(end)?)))
+                .collect()
+        } else {
+            quarterly(&self.gross_profit, as_of)
+        };
         let net = quarterly(&self.net_income, as_of);
         let mut m = GrowthMetrics::default();
         let Some((&latest, &rev_now)) = revenue.iter().next_back() else {
@@ -232,6 +246,11 @@ pub fn from_company_facts(json: &serde_json::Value) -> Series {
     Series {
         revenue,
         gross_profit: facts("us-gaap", "GrossProfit", "USD", true),
+        cost_of_revenue: COST_TAGS
+            .iter()
+            .map(|tag| facts("us-gaap", tag, "USD", true))
+            .find(|f| !f.is_empty())
+            .unwrap_or_default(),
         net_income: facts("us-gaap", "NetIncomeLoss", "USD", true),
         shares: {
             // The cover-page count, or, for filers with several share
@@ -251,6 +270,139 @@ pub fn from_company_facts(json: &serde_json::Value) -> Series {
                 cover
             }
         },
+    }
+}
+
+/// Company facts are refetched after this long; new quarters arrive about
+/// four times a year.
+const FACTS_TTL_DAYS: i64 = 7;
+
+#[derive(Serialize, Deserialize)]
+struct CachedSeries {
+    fetched_at: chrono::DateTime<chrono::Utc>,
+    series: Series,
+}
+
+/// Each company's facts from EDGAR, fetched on demand and cached in
+/// `<data dir>/warren/fundamentals/` (facts are megabytes; the parsed
+/// series is small).
+pub struct FundamentalsDirectory {
+    edgar: EdgarClient,
+    dir: std::path::PathBuf,
+    tickers: tokio::sync::Mutex<Option<(chrono::DateTime<chrono::Utc>, HashMap<String, u64>)>>,
+}
+
+impl FundamentalsDirectory {
+    pub fn open(edgar: EdgarClient, data_root: &std::path::Path) -> Result<Self> {
+        let dir = data_root.join("fundamentals");
+        fs::create_dir_all(&dir)?;
+        Ok(Self {
+            edgar,
+            dir,
+            tickers: tokio::sync::Mutex::new(None),
+        })
+    }
+
+    async fn cik(&self, symbol: &str) -> Result<Option<u64>> {
+        let now = chrono::Utc::now();
+        let mut tickers = self.tickers.lock().await;
+        if tickers
+            .as_ref()
+            .is_none_or(|(at, _)| now - *at > Duration::days(1))
+        {
+            *tickers = Some((now, self.edgar.tickers().await?));
+        }
+        Ok(tickers
+            .as_ref()
+            .and_then(|(_, map)| map.get(symbol).copied()))
+    }
+
+    /// The symbol's series, or `None` for companies without US-GAAP filings
+    /// (most foreign issuers file under IFRS).
+    pub async fn series(&self, symbol: &str) -> Result<Option<Series>> {
+        let Some(cik) = self.cik(symbol).await? else {
+            return Ok(None);
+        };
+        let path = self.dir.join(format!("{cik}.json"));
+        if let Some(cached) = fs::read(&path)
+            .ok()
+            .and_then(|b| serde_json::from_slice::<CachedSeries>(&b).ok())
+            .filter(|c| chrono::Utc::now() - c.fetched_at < Duration::days(FACTS_TTL_DAYS))
+        {
+            return Ok(Some(cached.series));
+        }
+        let series = from_company_facts(&self.edgar.company_facts(cik).await?);
+        let cached = CachedSeries {
+            fetched_at: chrono::Utc::now(),
+            series,
+        };
+        fs::write(&path, serde_json::to_vec(&cached)?)?;
+        Ok(Some(cached.series))
+    }
+}
+
+/// A report's fundamentals: growth metrics as of the research moment and
+/// the valuation at the research price.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Snapshot {
+    #[serde(flatten)]
+    pub metrics: GrowthMetrics,
+    pub market_cap: Option<f64>,
+    pub price_to_sales: Option<f64>,
+}
+
+impl Snapshot {
+    pub fn new(metrics: GrowthMetrics, price: Option<f64>) -> Self {
+        let (market_cap, price_to_sales) = price.map_or((None, None), |p| metrics.valuation(p));
+        Self {
+            metrics,
+            market_cap,
+            price_to_sales,
+        }
+    }
+
+    /// Lines for a prompt, skipping what's unknown.
+    pub fn describe(&self) -> String {
+        let m = &self.metrics;
+        let pct = |v: Option<f64>, what: &str| v.map(|v| format!("{what} {v:+.1}%"));
+        let money = |v: f64| {
+            if v.abs() >= 1e9 {
+                format!("${:.1}B", v / 1e9)
+            } else {
+                format!("${:.0}M", v / 1e6)
+            }
+        };
+        [
+            m.latest_quarter
+                .map(|q| format!("latest quarter ended {q}")),
+            pct(m.revenue_growth_percent, "revenue growth year over year"),
+            m.acceleration_points.map(|a| {
+                format!(
+                    "growth {} by {:.1} points vs the prior quarter",
+                    if a >= 0.0 {
+                        "accelerated"
+                    } else {
+                        "decelerated"
+                    },
+                    a.abs()
+                )
+            }),
+            m.ttm_revenue
+                .map(|r| format!("trailing-12-month revenue {}", money(r))),
+            m.gross_margin_percent
+                .map(|g| format!("gross margin {g:.1}%")),
+            m.gross_margin_change_points
+                .map(|c| format!("gross margin change {c:+.1} points over a year")),
+            m.ttm_net_margin_percent
+                .map(|n| format!("net margin {n:.1}%")),
+            pct(m.share_growth_percent, "share count change over a year"),
+            self.market_cap.map(|c| format!("market cap {}", money(c))),
+            self.price_to_sales.map(|p| format!("price/sales {p:.1}")),
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join("; ")
     }
 }
 
@@ -322,6 +474,7 @@ pub async fn series_from_frames(
     // Per company: facts by revenue tag, then the rest.
     let mut revenue: HashMap<u64, Vec<Vec<Fact>>> = HashMap::new();
     let mut by_cik: HashMap<u64, Series> = HashMap::new();
+    let mut costs: HashMap<u64, Vec<Vec<Fact>>> = HashMap::new();
     let total = periods.len();
     for (i, (period, end)) in periods.iter().enumerate() {
         eprintln!("  fundamentals {}/{total}: {period}", i + 1);
@@ -336,6 +489,14 @@ pub async fn series_from_frames(
         for (cik, start, e, v) in fetch("us-gaap", "GrossProfit", "USD", period, *end).await? {
             if let Some(f) = to_fact(&start, &e, v) {
                 by_cik.entry(cik).or_default().gross_profit.push(f);
+            }
+        }
+        for (t, tag) in COST_TAGS.iter().enumerate() {
+            for (cik, start, e, v) in fetch("us-gaap", tag, "USD", period, *end).await? {
+                if let Some(f) = to_fact(&start, &e, v) {
+                    let tags = costs.entry(cik).or_insert_with(|| vec![Vec::new(); 2]);
+                    tags[t].push(f);
+                }
             }
         }
         if period.contains('Q') {
@@ -362,6 +523,12 @@ pub async fn series_from_frames(
             .max_by_key(|f| f.iter().filter(|x| x.is_quarter()).map(|x| x.end).max())
             .unwrap_or_default();
         by_cik.entry(cik).or_default().revenue = best;
+    }
+
+    for (cik, tags) in costs {
+        // The first cost tag the company uses.
+        let first = tags.into_iter().find(|f| !f.is_empty()).unwrap_or_default();
+        by_cik.entry(cik).or_default().cost_of_revenue = first;
     }
 
     let tickers = edgar.tickers().await?;
@@ -462,6 +629,21 @@ mod tests {
         let m = s.metrics(d("2026-01-15"));
         assert_eq!(m.latest_quarter, Some(d("2025-09-30")));
         assert!(s.metrics(d("2024-04-01")).latest_quarter.is_none());
+    }
+
+    #[test]
+    fn gross_margin_from_cost_of_revenue() {
+        let mut s = calendar_series();
+        s.cost_of_revenue = s
+            .revenue
+            .iter()
+            .map(|f| Fact {
+                value: f.value * 0.4,
+                ..*f
+            })
+            .collect();
+        let m = s.metrics(d("2026-03-01"));
+        assert!((m.gross_margin_percent.unwrap() - 60.0).abs() < 1e-9);
     }
 
     #[test]

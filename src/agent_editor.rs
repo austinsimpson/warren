@@ -5,7 +5,7 @@ use gpui::{
     prelude::*, px, rgb,
 };
 
-use crate::strategy::{Horizon, LimitOverrides, RiskTolerance, Sector, Strategy, slug};
+use crate::strategy::{Horizon, LimitOverrides, RiskTolerance, Sector, Strategy, Style, slug};
 use crate::text_input::TextInput;
 use crate::theme::*;
 
@@ -286,6 +286,22 @@ impl Render for AgentEditor {
                 ))
             })
             .collect();
+        let style_choices = Style::ALL
+            .iter()
+            .map(|&style| {
+                ghost_button(style.label(), style.label(), d.style == style).on_click(cx.listener(
+                    move |this, _, _, cx| {
+                        this.update(cx, |s| {
+                            s.style = style;
+                            // Growth holds for months by default.
+                            if style == Style::Growth {
+                                s.horizon = Horizon::Position;
+                            }
+                        })
+                    },
+                ))
+            })
+            .collect();
         let horizon_choices = Horizon::ALL
             .iter()
             .map(|&h| {
@@ -460,6 +476,7 @@ impl Render for AgentEditor {
                 |v| format!("{v:.0}")
             ))
             .child(section("strategy"))
+            .child(row("Style", segmented(style_choices)))
             .child(row("Horizon", segmented(horizon_choices)))
             .child(row("Sectors", segmented(sector_choices)))
             .child(row(

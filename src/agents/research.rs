@@ -8,6 +8,8 @@ use chrono::{DateTime, Utc};
 use rig_core::schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use crate::strategy::Style;
+
 use super::{
     AgentCtx, AgentKind,
     jev::ShadowScores,
@@ -109,6 +111,10 @@ pub struct ResearchReport {
     /// recorded.
     #[serde(default)]
     pub trend_health: Option<TrendHealth>,
+    /// Fundamentals from SEC filings as of the research moment; absent for
+    /// companies without US-GAAP filings and on older reports.
+    #[serde(default)]
+    pub fundamentals: Option<crate::fundamentals::Snapshot>,
     /// Jev's scores for the same judgment factors, recorded for comparison.
     #[serde(default)]
     pub shadow: Option<ShadowScores>,
@@ -136,11 +142,9 @@ Report:
   some, even for a strong setup.
 - News highlights: the 3–6 most important recent items, newest first, each \
   dated, with what it means and whether the price already reflects it.
-- Levels: for a long setup, an entry range, a target, and a stop below \
-  entry. Stops should sit beyond a meaningful level, roughly 1–2.5 ATR from \
-  entry; targets should be reachable within the horizon. The executor may \
-  not buy above your entry range, so set it where buying makes sense rather \
-  than chasing. Leave levels empty if you see no long setup.
+- Levels: see the style section below. The executor may not buy above \
+  your entry range, so set it where buying makes sense rather than chasing. \
+  Leave levels empty if you see no long setup.
 - Factor scores: Warren has computed trend, momentum, relative strength, \
   and extension (how stretched the price is), shown in the request; do not \
   re-score them. Score catalyst, news sentiment, and setup quality (chart \
@@ -154,12 +158,71 @@ Rules:
 - You have no fundamentals feed beyond what you find; do not invent \
   financial figures.";
 
+/// The part of the prompt that depends on the agent's style.
+fn style_section(style: Style) -> &'static str {
+    match style {
+        Style::Swing => {
+            "\n\nSwing style: setups that play out over days to weeks. Give an \
+             entry range, a target reachable within the horizon given recent volatility, \
+             and a stop beyond a meaningful level, roughly 1–2.5 ATR below entry. Setup \
+             quality is about chart structure."
+        }
+        Style::Growth => {
+            "\n\nGrowth style: companies whose revenue is growing fast, at \
+             prices that don't already assume perfection, held for months while the \
+             thesis holds. Judge how fast and durable growth is and whether it is \
+             accelerating; the company's edge and market opportunity; margins, the path \
+             to profit, and dilution; and valuation against growth (in backtests, the \
+             most expensive stocks lagged even among fast growers). Use the fundamentals \
+             in the request and web search for earnings calls, guidance, and filings. \
+             Levels: an entry range where buying makes sense; a stop at the price that \
+             would break the thesis (a major support or roughly 20–30% below entry, not \
+             a tight ATR stop); a target only if you can justify a 6–12 month value; \
+             horizon_days of about 60–250. Score setup quality as the business setup \
+             (durability of growth and competitive position), not chart structure."
+        }
+    }
+}
+
 /// Research `symbol`, store the report, and return it.
 pub async fn run(ctx: &AgentCtx, symbol: &str) -> Result<ResearchReport> {
     let symbol = symbol.trim().to_uppercase();
     let config = &ctx.config.research.agent;
     ctx.recorded(AgentKind::Research, Some(&symbol), async |ctx| {
         let (quant, trend_health) = compute_quant_factors(ctx, &symbol).await?;
+        let price = match ctx.as_of {
+            // The last close at or before the replayed moment.
+            Some(as_of) => ctx
+                .alpaca
+                .daily_history_until(&symbol, as_of - chrono::Duration::days(10), Some(as_of))
+                .await
+                .ok()
+                .and_then(|bars| bars.last().map(|b| b.close)),
+            None => ctx
+                .alpaca
+                .snapshots(std::slice::from_ref(&symbol))
+                .await
+                .ok()
+                .and_then(|s| s.get(&symbol).and_then(|s| s.last_price())),
+        };
+        // Only figures filed by the research moment, so replays stay honest.
+        let fundamentals = match &ctx.fundamentals {
+            Some(directory) => directory
+                .series(&symbol)
+                .await
+                .ok()
+                .flatten()
+                .map(|series| series.metrics(ctx.now().date_naive()))
+                .filter(|m| m.latest_quarter.is_some())
+                .map(|m| crate::fundamentals::Snapshot::new(m, price)),
+            None => None,
+        };
+        let fundamentals_note = match &fundamentals {
+            Some(f) => format!("\n\nFundamentals from SEC filings: {}.", f.describe()),
+            None => "\n\nNo US-GAAP fundamentals on file (foreign issuers usually report \
+                     under IFRS); find figures with web search if you need them."
+                .to_string(),
+        };
         let sector = match &ctx.sectors {
             Some(directory) => match directory.profile(&symbol).await {
                 Ok(Some(p)) => format!(
@@ -186,8 +249,8 @@ pub async fn run(ctx: &AgentCtx, symbol: &str) -> Result<ResearchReport> {
             None => ctx.config.research.web_searches_per_stock,
             Some(_) => 0,
         };
-        let mut builder =
-            ctx.builder(AgentKind::Research, Some(&symbol), config, PREAMBLE.into())?;
+        let preamble = format!("{PREAMBLE}{}", style_section(ctx.strategy.style));
+        let mut builder = ctx.builder(AgentKind::Research, Some(&symbol), config, preamble)?;
         if searches > 0 {
             builder = builder.additional_params(serde_json::json!({
                 "tools": [{
@@ -218,7 +281,8 @@ pub async fn run(ctx: &AgentCtx, symbol: &str) -> Result<ResearchReport> {
         let research = agent
             .prompt_typed::<ResearchFindings>(format!(
                 "Research {symbol} now ({}) and return your report.\n\n\
-                 Computed factors (fixed; do not re-score):\n{}{sector}{search_note}",
+                 Computed factors (fixed; do not re-score):\n{}{sector}{fundamentals_note}\
+                 {search_note}",
                 ctx.now().format("%Y-%m-%d %H:%M UTC"),
                 describe(&quant),
             ))
@@ -228,21 +292,6 @@ pub async fn run(ctx: &AgentCtx, symbol: &str) -> Result<ResearchReport> {
         let (response, shadow) = tokio::join!(research, shadow_score(ctx, &symbol));
         let response = response.map_err(|err| anyhow!("research on {symbol} failed: {err}"))?;
 
-        let price = match ctx.as_of {
-            // The last close at or before the replayed moment.
-            Some(as_of) => ctx
-                .alpaca
-                .daily_history_until(&symbol, as_of - chrono::Duration::days(10), Some(as_of))
-                .await
-                .ok()
-                .and_then(|bars| bars.last().map(|b| b.close)),
-            None => ctx
-                .alpaca
-                .snapshots(std::slice::from_ref(&symbol))
-                .await
-                .ok()
-                .and_then(|s| s.get(&symbol).and_then(|s| s.last_price())),
-        };
         let findings = response.output;
         let (risk_reward, factors) = scoring::score(&findings, quant, price);
         let report = ResearchReport {
@@ -254,6 +303,7 @@ pub async fn run(ctx: &AgentCtx, symbol: &str) -> Result<ResearchReport> {
             risk_reward,
             factors,
             shadow,
+            fundamentals,
             trend_health: Some(trend_health),
             findings,
         };

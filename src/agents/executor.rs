@@ -8,6 +8,7 @@ use chrono::Utc;
 use super::{AgentCtx, AgentKind, tools::*};
 use crate::config::ExecutorConfig;
 use crate::market::alpaca::OrderSide;
+use crate::strategy::Style;
 
 /// An order as the risk check sees it.
 #[derive(Debug, Clone)]
@@ -187,7 +188,7 @@ Judgment aids (yours to use, not rules):
 - Trend health in reports (distance below the 52-week high, 12-1 month \
   return): stocks far below their highs or down over the year kept lagging.
 - Trading often cost about 3% a year in backtests; don't swap a holding for \
-  a marginally better idea.
+  a marginally better idea.{style}
 
 Hard limits (place_order enforces these and refuses violations):
 - Max ${max_notional:.0} per order; max {max_pos:.1}% of equity per position; at \
@@ -211,6 +212,20 @@ Lessons from your past decisions:
             "is allowed"
         } else {
             "is disabled"
+        },
+        style = match ctx.strategy.style {
+            Style::Swing => "",
+            Style::Growth =>
+                "
+- Growth style: you own businesses for months while the thesis holds. Judge \
+  holdings on the business (growth, guidance, margins, the reports' risks), \
+  not daily noise; sell when the thesis breaks, the research stop (a \
+  thesis-break level) is hit, or valuation runs far ahead of growth. Size \
+  by the strength of the thesis; adding to a winner whose thesis is \
+  improving is fine. Reports include fundamentals from SEC filings. In \
+  backtests, fast growth at a reasonable price with positive 12-month \
+  momentum, held 3–6 months, beat the average stock; the most expensive \
+  stocks lagged.",
         },
     ))
 }

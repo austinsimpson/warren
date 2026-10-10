@@ -46,6 +46,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::config::{AgentModel, Config};
+use crate::fundamentals::FundamentalsDirectory;
 use crate::market::alpaca::AlpacaClient;
 use crate::market::edgar::EdgarClient;
 use crate::sectors::SectorDirectory;
@@ -118,6 +119,8 @@ pub struct AgentCtx {
     pub as_of: Option<DateTime<Utc>>,
     /// Company sectors from SEC EDGAR; `None` until a contact email is set.
     pub sectors: Option<Arc<SectorDirectory>>,
+    /// Company fundamentals from SEC EDGAR, likewise.
+    pub fundamentals: Option<Arc<FundamentalsDirectory>>,
     /// The user-created agent this context runs for. `config` and `store`
     /// are its own.
     pub strategy: Arc<Strategy>,
@@ -417,6 +420,7 @@ impl AgentCtx {
             meter: Meter::default(),
             strategy: Arc::new(strategy),
             sectors: None,
+            fundamentals: None,
             as_of: None,
         };
         let mut ctx = ctx;
@@ -429,6 +433,13 @@ impl AgentCtx {
                 ctx.status("Sector data off: set edgar.contact in config.toml");
                 None
             }
+        };
+        ctx.fundamentals = match (
+            EdgarClient::new(&ctx.config.edgar.contact),
+            Store::default_dir(),
+        ) {
+            (Ok(edgar), Ok(root)) => FundamentalsDirectory::open(edgar, &root).ok().map(Arc::new),
+            _ => None,
         };
         if ctx.config.jev.enabled && ctx.jev.is_none() {
             ctx.status("Jev shadow scoring disabled: set JEV_API_KEY");
@@ -466,6 +477,7 @@ pub(crate) mod test_support {
                 risk_reward: None,
             },
             shadow: None,
+            fundamentals: None,
             trend_health: None,
             findings: research::ResearchFindings {
                 horizon_days: 10,

@@ -7,6 +7,7 @@ use rig_core::schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use super::{AgentCtx, AgentKind, tools::*};
+use crate::strategy::Style;
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[schemars(crate = "rig_core::schemars")]
@@ -62,15 +63,28 @@ Selection rules:
 - At most {max} candidates, ordered by priority.
 - Price at least ${min_price:.2} and 20-day average dollar volume at least \
   ${min_dv:.0}.
-- Favor high composite ranks with a clear, current reason to act: a catalyst, \
-  a breakout or pullback to support in a long-run uptrend. Avoid one-day \
-  spikes with no follow-through story, and avoid chasing extended moves \
-  (extension below 3).
 - Each rationale must cite specific data (price levels, indicator values, \
-  headlines).",
+  fundamentals, headlines).{style}",
         max = config.max_candidates,
         min_price = config.min_price,
         min_dv = config.min_avg_dollar_volume,
+        style = match ctx.strategy.style {
+            Style::Swing =>
+                "
+- Swing style: favor high composite ranks with a clear, current reason to act: \
+  a catalyst, a breakout or pullback to support in a long-run uptrend. Avoid \
+  one-day spikes with no follow-through story, and avoid chasing extended \
+  moves (extension below 3).",
+            Style::Growth =>
+                "
+- Growth style: scan_universe ranks companies with gross margins of 40%+ by \
+  revenue growth, growth acceleration, cheapness (price/sales), and 12-1 month \
+  momentum; in backtests its top fifth, held 3–6 months, beat the average \
+  stock by about 1.5–2% a year (not SPY). Favor high ranks \
+  whose growth looks durable, and use get_news (and your judgment) for a \
+  story that can run for quarters. Skip the day's movers unless one is a \
+  genuine growth company. Candidates are worth researching weekly, not daily.",
+        },
     )
 }
 
