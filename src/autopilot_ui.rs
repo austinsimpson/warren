@@ -9,6 +9,7 @@ use std::{
 use chrono::Local;
 use gpui::{Context, Div, FontWeight, SharedString, div, prelude::*, px, rgb};
 
+use crate::agents::book::Book;
 use crate::agents::{
     AgentCtx, AgentEvent, AgentKind, EventKind,
     autopilot::{Autopilot, Control},
@@ -27,7 +28,9 @@ const MAX_EVENTS: usize = 300;
 
 pub struct AgentsState {
     pub ctx: AgentCtx,
-    control: Arc<Control>,
+    pub control: Arc<Control>,
+    /// The agent's book, refreshed with the portfolio.
+    pub book: Option<Book>,
     events: VecDeque<AgentEvent>,
     pub reports: HashMap<String, ResearchReport>,
     pub candidates: Option<CandidateList>,
@@ -77,10 +80,17 @@ impl AgentsState {
 /// Load the user's agents (moving pre-agent data into a "Default" one, or
 /// creating it on first run), start each one's autopilot on the tokio
 /// runtime, and pump their events into the view.
+/// Where agents' settings live, and the app-wide config they build on, for
+/// creating and editing agents.
+pub struct AgentHome {
+    pub strategies: Strategies,
+    pub global: Config,
+}
+
 pub fn start(
     alpaca: Arc<AlpacaClient>,
     cx: &mut Context<Warren>,
-) -> anyhow::Result<Vec<AgentsState>> {
+) -> anyhow::Result<(Vec<AgentsState>, AgentHome)> {
     let global = Config::load_or_create()?;
     let data_root = Store::default_dir()?;
     let strategies = Strategies::new(&data_root);
@@ -123,18 +133,19 @@ pub fn start(
     })
     .detach();
 
-    Ok(states)
+    Ok((states, AgentHome { strategies, global }))
 }
 
 impl AgentsState {
     /// Spawn `ctx`'s autopilot and load its state.
-    fn start(ctx: AgentCtx) -> Self {
+    pub fn start(ctx: AgentCtx) -> Self {
         let autopilot = Autopilot::new(ctx.clone());
         let control = autopilot.control();
         runtime::RUNTIME.spawn(autopilot.run());
         let mut state = AgentsState {
             ctx,
             control,
+            book: None,
             events: VecDeque::new(),
             reports: HashMap::new(),
             candidates: None,

@@ -1,4 +1,6 @@
+mod agent_editor;
 mod agents;
+mod agents_ui;
 mod autopilot_ui;
 mod backtest;
 mod chart;
@@ -11,14 +13,16 @@ mod scorecard_ui;
 mod sectors;
 mod store;
 mod strategy;
+mod text_input;
 mod theme;
 
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use chrono::Utc;
 use gpui::{
-    App, Bounds, Context, Div, ElementId, FontWeight, SharedString, Stateful, TitlebarOptions,
-    Window, WindowBounds, WindowOptions, div, point, prelude::*, px, rgb, size, transparent_black,
+    App, Bounds, Context, Div, ElementId, Entity, FontWeight, SharedString, Stateful, Subscription,
+    TitlebarOptions, Window, WindowBounds, WindowOptions, div, point, prelude::*, px, rgb, size,
+    transparent_black,
 };
 
 use autopilot_ui::AgentsState;
@@ -52,6 +56,11 @@ struct Warren {
     /// Index into `agents` of the agent the UI shows.
     selected_agent: usize,
     agents_error: Option<SharedString>,
+    /// For creating and editing agents.
+    home: Option<autopilot_ui::AgentHome>,
+    /// The open agent form, which replaces the chart while open, its
+    /// subscription, and whether it creates a new agent.
+    editor: Option<(Entity<agent_editor::AgentEditor>, Subscription, bool)>,
     bottom_tab: scorecard_ui::BottomTab,
     scorecard: scorecard_ui::ScorecardState,
 }
@@ -62,14 +71,17 @@ impl Warren {
             Ok(client) => (Some(Arc::new(client)), "Loading…".into()),
             Err(err) => (None, format!("Market data unavailable: {err:#}").into()),
         };
-        let (agents, agents_error) = match alpaca.clone().map(|a| autopilot_ui::start(a, cx)) {
-            Some(Ok(agents)) => (agents, None),
+        let (agents, home, agents_error) = match alpaca.clone().map(|a| autopilot_ui::start(a, cx))
+        {
+            Some(Ok((agents, home))) => (agents, Some(home), None),
             Some(Err(err)) => (
                 Vec::new(),
+                None,
                 Some(format!("Autopilot unavailable: {err:#}").into()),
             ),
             None => (
                 Vec::new(),
+                None,
                 Some("Autopilot needs Alpaca credentials".into()),
             ),
         };
@@ -87,6 +99,8 @@ impl Warren {
             agents,
             selected_agent: 0,
             agents_error,
+            home,
+            editor: None,
             bottom_tab: Default::default(),
             scorecard: Default::default(),
         };
@@ -236,6 +250,7 @@ impl Warren {
             .border_color(rgb(BORDER))
             .id("watchlist")
             .overflow_y_scroll()
+            .child(self.render_agent_list(cx))
             .children(sections)
             .when(!self.market_status.is_empty(), |col| {
                 col.child(
@@ -435,13 +450,21 @@ impl Render for Warren {
                 )),
             );
 
-        let center = div()
-            .flex()
-            .flex_col()
-            .flex_1()
-            .min_w_0()
-            .child(self.render_chart_panel(cx))
-            .child(self.render_order_ticket(cx));
+        let center = match &self.editor {
+            Some((editor, _, _)) => div()
+                .flex()
+                .flex_col()
+                .flex_1()
+                .min_w_0()
+                .child(editor.clone()),
+            None => div()
+                .flex()
+                .flex_col()
+                .flex_1()
+                .min_w_0()
+                .child(self.render_chart_panel(cx))
+                .child(self.render_order_ticket(cx)),
+        };
 
         div()
             .flex()
@@ -488,6 +511,7 @@ fn main() {
         if let Err(err) = theme::load_fonts(cx) {
             eprintln!("failed to load bundled fonts: {err:#}");
         }
+        text_input::bind_keys(cx);
         let bounds = Bounds::centered(None, size(px(1200.), px(760.)), cx);
         cx.open_window(
             WindowOptions {

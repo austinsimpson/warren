@@ -14,14 +14,25 @@ use chrono::{Local, Utc};
 use tokio::sync::Notify;
 
 use super::{AgentCtx, AgentKind, book::Book, executor, exploration, research};
+use crate::config::Config;
+use crate::strategy::Strategy;
 
 /// Shared between the loop and the UI.
 pub struct Control {
     wake: Notify,
     run_now: std::sync::atomic::AtomicBool,
+    /// Edited settings for the loop to adopt before its next step.
+    pending: std::sync::Mutex<Option<(Arc<Strategy>, Arc<Config>)>>,
 }
 
 impl Control {
+    /// Hand the loop new settings. Runs already in flight finish with the
+    /// old ones.
+    pub fn update(&self, strategy: Arc<Strategy>, config: Arc<Config>) {
+        *self.pending.lock().unwrap() = Some((strategy, config));
+        self.wake.notify_one();
+    }
+
     /// Start a cycle immediately, even if the market is closed.
     pub fn run_now(&self) {
         self.run_now.store(true, Ordering::Relaxed);
@@ -50,6 +61,7 @@ impl Autopilot {
             control: Arc::new(Control {
                 wake: Notify::new(),
                 run_now: false.into(),
+                pending: Default::default(),
             }),
         }
     }
@@ -70,10 +82,14 @@ impl Autopilot {
     }
 
     /// Run forever on the tokio runtime.
-    pub async fn run(self) {
-        let ctx = &self.ctx;
+    pub async fn run(mut self) {
         let mut next_cycle = tokio::time::Instant::now();
         loop {
+            if let Some((strategy, config)) = self.control.pending.lock().unwrap().take() {
+                self.ctx.strategy = strategy;
+                self.ctx.config = config;
+            }
+            let ctx = &self.ctx;
             if self.is_paused() {
                 ctx.status("Paused");
                 self.control.wake.notified().await;

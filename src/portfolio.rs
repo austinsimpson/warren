@@ -2,6 +2,7 @@
 
 use gpui::{Context, Div, ElementId, FontWeight, SharedString, div, prelude::*, px, rgb};
 
+use crate::agents::book::Book;
 use crate::market::alpaca::{Account, NewOrder, Order, OrderSide, OrderType, Position};
 use crate::theme::*;
 use crate::{Warren, runtime};
@@ -10,7 +11,7 @@ const RECENT_ORDER_COUNT: u32 = 20;
 
 #[derive(Default)]
 pub struct Portfolio {
-    account: Option<Account>,
+    pub account: Option<Account>,
     positions: Vec<Position>,
     orders: Vec<Order>,
     status: SharedString,
@@ -58,19 +59,42 @@ impl Warren {
         let Some(alpaca) = self.alpaca.clone() else {
             return;
         };
+        // Every agent's book comes from one pull of order history since the
+        // oldest agent was created.
+        let since = self.agents.iter().map(|a| a.ctx.strategy.created_at).min();
         cx.spawn(async move |this, cx| {
             let result = runtime::run(async move {
+                let history = async {
+                    match since {
+                        Some(since) => {
+                            alpaca
+                                .orders_after(since - chrono::Duration::minutes(1))
+                                .await
+                        }
+                        None => Ok(Vec::new()),
+                    }
+                };
                 Ok(tokio::try_join!(
                     alpaca.account(),
                     alpaca.positions(),
                     alpaca.recent_orders(RECENT_ORDER_COUNT),
+                    history,
                 )?)
             })
             .await;
             this.update(cx, |this, cx| {
+                if let Ok((_, positions, _, history)) = &result {
+                    let prices: std::collections::HashMap<String, f64> = positions
+                        .iter()
+                        .filter_map(|p| Some((p.symbol.clone(), p.current_price?)))
+                        .collect();
+                    for agent in &mut this.agents {
+                        agent.book = Some(Book::from_orders(&agent.ctx.strategy, history, &prices));
+                    }
+                }
                 let portfolio = &mut this.portfolio;
                 match result {
-                    Ok((account, positions, orders)) => {
+                    Ok((account, positions, orders, _)) => {
                         portfolio.account = Some(account);
                         portfolio.positions = positions;
                         portfolio.orders = orders;
