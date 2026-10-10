@@ -9,7 +9,6 @@ use crate::{Warren, runtime};
 
 /// A scorecard older than this is recomputed when its tab is opened.
 const SCORECARD_STALE_AFTER: Duration = Duration::minutes(10);
-const PANEL_HEIGHT: f32 = 150.;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum BottomTab {
@@ -122,13 +121,11 @@ impl Warren {
         div()
             .flex()
             .flex_col()
-            .h(px(PANEL_HEIGHT))
+            .h(px(self.shown.bottom))
             .flex_none()
             .px_3()
             .py_2()
             .gap_1()
-            .border_t_1()
-            .border_color(rgb(BORDER))
             .child(header)
             .child(body)
     }

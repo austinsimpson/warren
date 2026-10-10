@@ -466,12 +466,10 @@ impl Warren {
         div()
             .flex()
             .flex_col()
-            .w(px(260.))
+            .w(px(self.shown.right))
             .flex_none()
             .p_2()
             .gap_1()
-            .border_l_1()
-            .border_color(rgb(BORDER))
             .children(self.portfolio.account.as_ref().map(|account| {
                 let row = |name: &'static str, value: String| {
                     div()

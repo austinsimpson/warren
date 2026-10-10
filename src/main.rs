@@ -7,6 +7,7 @@ mod chart;
 mod config;
 mod exploration_ui;
 mod fundamentals;
+mod layout;
 mod market;
 mod portfolio;
 mod replay;
@@ -40,7 +41,7 @@ use theme::*;
 const MARKET_SYMBOLS: &[&str] = &["SPY", "QQQ"];
 const REFRESH_INTERVAL: Duration = Duration::from_secs(10);
 /// The header doubles as the (transparent) title bar.
-const HEADER_HEIGHT: f32 = 38.;
+pub(crate) const HEADER_HEIGHT: f32 = 38.;
 /// Room for the macOS traffic lights at the left of the header.
 const TRAFFIC_LIGHT_INSET: f32 = 80.;
 
@@ -79,6 +80,11 @@ struct Warren {
     editor: Option<(Entity<agent_editor::AgentEditor>, Subscription, bool)>,
     bottom_tab: scorecard_ui::BottomTab,
     scorecard: scorecard_ui::ScorecardState,
+    /// The panels' sizes, and the divider being dragged.
+    panels: layout::PanelSizes,
+    /// `panels` fitted to the window, as drawn.
+    shown: layout::PanelSizes,
+    resizing: Option<layout::Edge>,
 }
 
 impl Warren {
@@ -124,6 +130,9 @@ impl Warren {
             editor: None,
             bottom_tab: Default::default(),
             scorecard: Default::default(),
+            panels: layout::PanelSizes::load(),
+            shown: Default::default(),
+            resizing: None,
         };
         this.refresh_quotes(cx);
         this.load_chart(cx);
@@ -283,12 +292,10 @@ impl Warren {
         div()
             .flex()
             .flex_col()
-            .w(px(200.))
+            .w(px(self.shown.left))
             .flex_none()
             .p_2()
             .gap_1()
-            .border_r_1()
-            .border_color(rgb(BORDER))
             .id("watchlist")
             .overflow_y_scroll()
             .child(self.render_agent_list(cx))
@@ -573,7 +580,8 @@ impl Warren {
 }
 
 impl Render for Warren {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.shown = self.panels.fit(window.viewport_size());
         let header = div()
             .flex()
             .flex_row()
@@ -625,7 +633,7 @@ impl Render for Warren {
             },
         };
 
-        div()
+        let root = div()
             .flex()
             .flex_col()
             .size_full()
@@ -642,10 +650,21 @@ impl Render for Warren {
                     .flex_1()
                     .min_h_0()
                     .child(self.render_watchlist(cx))
+                    .child(self.divider(layout::Edge::Left, cx))
                     .child(center)
+                    .child(self.divider(layout::Edge::Right, cx))
                     .child(self.render_positions_and_orders(cx)),
             )
+            .child(self.divider(layout::Edge::Bottom, cx))
             .child(self.render_bottom_panel(cx))
+            .when(self.resizing.is_some(), |root| {
+                root.cursor(if self.resizing == Some(layout::Edge::Bottom) {
+                    gpui::CursorStyle::ResizeRow
+                } else {
+                    gpui::CursorStyle::ResizeColumn
+                })
+            });
+        layout::track_resize(root, cx)
     }
 }
 
