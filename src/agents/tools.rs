@@ -10,7 +10,7 @@ use rig_core::schemars::{self, JsonSchema};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use super::{AgentCtx, book::Book, executor, research::TrendHealth, technicals};
+use super::{AgentCtx, book::Book, executor, research::TrendHealth, scan, technicals};
 use crate::market::alpaca::{NewOrder, OrderSide, Timeframe};
 use crate::store::JournalEntry;
 
@@ -288,6 +288,57 @@ impl GetAsset {
 // ---------------------------------------------------------------------------
 // Exploration
 // ---------------------------------------------------------------------------
+
+#[derive(Deserialize, JsonSchema)]
+#[schemars(crate = "rig_core::schemars")]
+pub struct ScanArgs {
+    /// How many top-ranked names to return, 1 to 60.
+    pub top: u32,
+}
+
+tool!(
+    ScanUniverse,
+    "scan_universe",
+    ScanArgs,
+    "Every liquid US stock this agent may buy, ranked by a composite that held up in \
+     backtests: 12-1 month momentum and nearness to the 52-week high (each as a quintile \
+     across the market) plus how calm the price is (extension; 5 = not stretched). \
+     Composite runs 3 to 15. Returns the top names with their price, 12-1 month return, \
+     distance below the 52-week high, extension score, 1-month return, dollar volume, and \
+     sector. The first call of the day can take a minute or two."
+);
+
+impl ScanUniverse {
+    async fn run(&self, args: ScanArgs) -> ToolResult {
+        let ctx = &self.0;
+        let universe = &ctx.strategy.universe;
+        let rows = scan::scan(ctx, universe.min_price, universe.min_avg_dollar_volume)
+            .await
+            .map_err(failed)?;
+        let total = rows.len();
+        let top = scan::top_for_agent(ctx, &rows, args.top.clamp(1, 60) as usize).await;
+        let ranked: Vec<Value> = top
+            .iter()
+            .map(|(r, sector)| {
+                json!({
+                    "symbol": r.symbol,
+                    "price": round2(r.price),
+                    "composite": r.composite,
+                    "return_12_1_percent": round2(r.return_12_1_percent),
+                    "percent_below_52w_high": round2(r.percent_below_52w_high),
+                    "extension": r.extension,
+                    "return_1m_percent": r.return_1m_percent.map(round2),
+                    "avg_dollar_volume_20d": r.avg_dollar_volume_20d.round(),
+                    "sector": sector,
+                })
+            })
+            .collect();
+        Ok(json!({
+            "liquid_stocks_ranked": total,
+            "top": ranked,
+        }))
+    }
+}
 
 #[derive(Deserialize, JsonSchema)]
 #[schemars(crate = "rig_core::schemars")]
@@ -631,6 +682,19 @@ async fn quotes_as_of(
     }))
 }
 
+/// Weekdays from `since` to today, a close enough count of trading days.
+fn trading_days_since(since: chrono::DateTime<Utc>) -> usize {
+    let (mut day, today) = (since.date_naive(), Utc::now().date_naive());
+    let mut count = 0;
+    while day < today {
+        day = day.succ_opt().unwrap_or(today);
+        if chrono::Datelike::weekday(&day).number_from_monday() <= 5 {
+            count += 1;
+        }
+    }
+    count
+}
+
 fn orders_today(ctx: &AgentCtx) -> anyhow::Result<usize> {
     let today = Local::now().date_naive();
     Ok(ctx
@@ -735,6 +799,9 @@ impl PlaceOrder {
             equity: book.equity(),
             cash: book.available_cash(),
             open_positions: book.positions.len(),
+            held_days: book
+                .holding(&symbol)
+                .map(|h| trading_days_since(h.opened_at)),
             orders_today: orders_today(ctx).map_err(failed)?,
             limit_price: args.limit_price,
             last_price: price,
@@ -742,6 +809,7 @@ impl PlaceOrder {
                 rating: r.rating,
                 conviction: r.conviction,
                 entry_high: r.findings.entry_high,
+                stop_loss: r.findings.stop_loss,
                 trend_health,
             }),
         };

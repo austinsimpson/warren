@@ -33,11 +33,11 @@
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     fs,
-    path::PathBuf,
+    path::{Path, PathBuf},
 };
 
 use anyhow::{Context as _, Result, bail};
-use chrono::{NaiveDate, Utc};
+use chrono::{DateTime, NaiveDate, Utc};
 use futures::{StreamExt as _, stream};
 
 use crate::agents::{
@@ -71,7 +71,7 @@ const FACTORS: [&str; 4] = ["trend", "momentum", "rel strength", "extension"];
 /// value), so no thresholds need choosing. With several candidates, some
 /// will look good by chance: trust one only if both halves of the history
 /// agree.
-const INDICATORS: [Indicator; 5] = [
+const INDICATORS: [Indicator; 6] = [
     Indicator {
         name: "1-week return",
         expect: "short-term reversal: lowest quintile best",
@@ -92,7 +92,15 @@ const INDICATORS: [Indicator; 5] = [
         name: "volatility",
         expect: "low-volatility anomaly: lowest quintile best risk-adjusted",
     },
+    Indicator {
+        name: "composite",
+        expect: "12-1 momentum + near the 52-week high + not extended: highest best",
+    },
 ];
+
+/// Index of the composite in [`INDICATORS`]: the sum of the 12-1 momentum
+/// and 52-week-high quintiles and the extension score, set after quintiles.
+const COMPOSITE: usize = 5;
 
 struct Indicator {
     name: &'static str,
@@ -101,7 +109,7 @@ struct Indicator {
 
 /// Raw indicator values at bar `j`, in [`INDICATORS`] order; NaN where the
 /// history is too short.
-fn indicators(bars: &[Bar], j: usize) -> [f64; 5] {
+fn indicators(bars: &[Bar], j: usize) -> [f64; 6] {
     let close = |k: usize| j.checked_sub(k).map_or(f64::NAN, |i| bars[i].close);
     let week = close(0) / close(5) - 1.0;
     let year = &bars[j.saturating_sub(251)..=j];
@@ -127,11 +135,19 @@ fn indicators(bars: &[Bar], j: usize) -> [f64; 5] {
         }
         None => f64::NAN,
     };
-    [week, near_high, momentum, relative_volume, volatility]
+    // The composite needs every name's quintiles; see `observe_all`.
+    [
+        week,
+        near_high,
+        momentum,
+        relative_volume,
+        volatility,
+        f64::NAN,
+    ]
 }
 
 /// Quintile (1–5) of each finite value among `values`; 0 for NaN.
-fn quintiles(values: &[f64]) -> Vec<u8> {
+pub(crate) fn quintiles(values: &[f64]) -> Vec<u8> {
     let mut order: Vec<usize> = (0..values.len())
         .filter(|&i| values[i].is_finite())
         .collect();
@@ -217,7 +233,27 @@ pub fn run_cli(args: &[String]) -> Result<()> {
             );
             (stocks, Some(screen), description)
         }
-        other => bail!("unknown universe {other:?}; use large or screened"),
+        "liquid" => {
+            // Every stock above exploration's floors, not just the day's
+            // most active and biggest movers.
+            let config = Config::load_or_create()?;
+            let screen = Screen {
+                min_price: config.exploration.min_price,
+                min_dollar_volume: config.exploration.min_avg_dollar_volume,
+                most_active: usize::MAX,
+                movers: 0,
+            };
+            let stocks = runtime.block_on(fetch_screened_pool(&alpaca, &cache, &screen))?;
+            let description = format!(
+                "every liquid stock among {} listings (price >= ${:.0}, 20-day dollar volume \
+                 >= ${:.0}M)",
+                stocks.len(),
+                screen.min_price,
+                screen.min_dollar_volume / 1e6,
+            );
+            (stocks, Some(screen), description)
+        }
+        other => bail!("unknown universe {other:?}; use large, screened, or liquid"),
     };
     let observations = observe_all(&benchmark, &stocks, horizon, screen.as_ref());
     if observations.is_empty() {
@@ -303,7 +339,7 @@ impl Screen {
 
 /// Listings exploration could pick: common stocks and ADRs on the major
 /// exchanges, not funds, warrants, units, rights, notes, or preferreds.
-fn is_screenable(asset: &crate::market::alpaca::Asset) -> bool {
+pub(crate) fn is_screenable(asset: &crate::market::alpaca::Asset) -> bool {
     const EXCLUDED: [&str; 16] = [
         "ETF",
         "Fund",
@@ -421,14 +457,22 @@ async fn fetch(alpaca: &AlpacaClient, cache: &BarCache, symbols: Vec<String>) ->
 /// settings don't refetch it. Earlier days' caches are deleted.
 pub(crate) struct BarCache {
     dir: PathBuf,
+    /// Where each symbol's history starts.
+    start: DateTime<Utc>,
 }
 
 impl BarCache {
+    /// The full history since 2016, for backtests.
     pub(crate) fn today() -> Result<Self> {
+        Self::named("bars", HISTORY_START.parse()?)
+    }
+
+    /// Today's cache under `name`, with histories from `start`.
+    pub(crate) fn named(name: &str, start: DateTime<Utc>) -> Result<Self> {
         let root = dirs::cache_dir()
             .context("no cache directory on this platform")?
             .join("warren")
-            .join("bars");
+            .join(name);
         let dir = root.join(Utc::now().format("%Y-%m-%d").to_string());
         fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
         for entry in fs::read_dir(&root)?.flatten() {
@@ -436,7 +480,11 @@ impl BarCache {
                 fs::remove_dir_all(entry.path()).ok();
             }
         }
-        Ok(Self { dir })
+        Ok(Self { dir, start })
+    }
+
+    pub(crate) fn dir(&self) -> &Path {
+        &self.dir
     }
 
     fn path(&self, symbol: &str) -> PathBuf {
@@ -458,14 +506,14 @@ impl BarCache {
         if let Some(bars) = self.cached(symbol) {
             return Ok(bars);
         }
-        let bars = alpaca.daily_history(symbol, HISTORY_START.parse()?).await?;
+        let bars = alpaca.daily_history(symbol, self.start).await?;
         self.store(symbol, &bars)?;
         Ok(bars)
     }
 
     /// Like [`Self::history`] for many symbols, fetching the uncached ones
     /// in batches. Symbols without bars map to an empty history.
-    async fn history_many(
+    pub(crate) async fn history_many(
         &self,
         alpaca: &AlpacaClient,
         symbols: &[String],
@@ -480,7 +528,7 @@ impl BarCache {
                 None => missing.push(symbol.clone()),
             }
         }
-        let start = HISTORY_START.parse()?;
+        let start = self.start;
         for (i, batch) in missing.chunks(BATCH).enumerate() {
             eprintln!(
                 "  daily bars {}/{} symbols",
@@ -524,8 +572,8 @@ struct Observation {
     excess: f64,
     /// Raw [`INDICATORS`] values, and their quintiles on the date (0 when
     /// unavailable); quintiles are set once every symbol is observed.
-    indicators: [f64; 5],
-    quintiles: [u8; 5],
+    indicators: [f64; 6],
+    quintiles: [u8; 6],
 }
 
 fn date(bar: &Bar) -> NaiveDate {
@@ -581,6 +629,16 @@ fn observe_all(
                 obs.excess = obs.forward - mean;
             }
             for k in 0..INDICATORS.len() {
+                if k == COMPOSITE {
+                    for obs in today.iter_mut() {
+                        let (high, momentum) = (obs.quintiles[1], obs.quintiles[2]);
+                        obs.indicators[COMPOSITE] = if high > 0 && momentum > 0 {
+                            f64::from(high + momentum + obs.scores[3])
+                        } else {
+                            f64::NAN
+                        };
+                    }
+                }
                 let values: Vec<f64> = today.iter().map(|o| o.indicators[k]).collect();
                 for (obs, q) in today.iter_mut().zip(quintiles(&values)) {
                     obs.quintiles[k] = q;
@@ -631,7 +689,7 @@ fn observe(
         bracketed: simulate_trade(ahead, now.atr_14?),
         excess: 0.0,
         indicators: indicators(bars, j),
-        quintiles: [0; 5],
+        quintiles: [0; 6],
     })
 }
 
@@ -870,6 +928,31 @@ fn report(observations: &[Observation], universe: &str, horizon: usize) -> Strin
             wins as f64 / trades.len().max(1) as f64 * 100.0,
         );
     }
+    {
+        let mut trades: Vec<f64> = Vec::new();
+        let returns: Vec<f64> = periods
+            .iter()
+            .map(|(_, obs)| {
+                let picked: Vec<f64> = obs
+                    .iter()
+                    .filter(|o| o.quintiles[COMPOSITE] == 5)
+                    .map(|o| o.held)
+                    .collect();
+                trades.extend(&picked);
+                mean(picked).unwrap_or(0.0)
+            })
+            .collect();
+        let wins = trades.iter().filter(|&&t| t > 0.0).count();
+        out += &format!(
+            "{:<17} {} {:>7.0}% {:>7.1} {:>8} {:>8.0}%\n",
+            "  hold composite5",
+            curve_stats(&returns, years, horizon),
+            100.0,
+            trades.len() as f64 / periods.len() as f64,
+            trades.len(),
+            wins as f64 / trades.len().max(1) as f64 * 100.0,
+        );
+    }
     let universe: Vec<f64> = periods
         .iter()
         .map(|(_, obs)| mean(obs.iter().map(|o| o.forward)).unwrap_or(0.0))
@@ -1057,8 +1140,9 @@ mod tests {
             b.close *= 2.0;
             b.volume *= 2;
         }
-        assert_eq!(before, indicators(&altered, 700));
-        assert!(before.iter().all(|v| v.is_finite()));
+        // The composite is filled in later, across names.
+        assert_eq!(before[..COMPOSITE], indicators(&altered, 700)[..COMPOSITE]);
+        assert!(before[..COMPOSITE].iter().all(|v| v.is_finite()));
     }
 
     #[test]

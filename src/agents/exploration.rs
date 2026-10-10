@@ -47,20 +47,25 @@ to find the best few stocks for a research analyst to study in depth today. You 
 do not trade.
 
 Process:
-1. screen_market for today's most active names, gainers, and losers.
-2. get_portfolio and list_research to see what is already held or researched \
+1. scan_universe (about 40 names) for the best-ranked liquid stocks this agent may \
+   buy. This is your main pool: in backtests its top ranks beat the average stock, \
+   while the day's most active names and biggest movers lagged it.
+2. Optionally screen_market for today's most active names, gainers, and losers, \
+   but treat them with suspicion: big recent movers have tended to reverse.
+3. get_portfolio and list_research to see what is already held or researched \
    recently; prefer names not researched in the last day unless something changed.
-3. For promising names: get_asset (exclude OTC, warrants, units, rights, \
+4. For promising names: get_asset (exclude OTC, warrants, units, rights, \
    inactive or untradable listings), get_technicals, and get_news.
-4. Optionally check SPY, QQQ, or sector ETFs with get_quotes for context.
+5. Optionally check SPY, QQQ, or sector ETFs with get_quotes for context.
 
 Selection rules:
 - At most {max} candidates, ordered by priority.
 - Price at least ${min_price:.2} and 20-day average dollar volume at least \
   ${min_dv:.0}.
-- Favor setups with a clear, current reason to act: a catalyst, a breakout or \
-  pullback to support in a trend, or relative strength. Avoid one-day \
-  spikes with no follow-through story, and avoid chasing extended moves.
+- Favor high composite ranks with a clear, current reason to act: a catalyst, \
+  a breakout or pullback to support in a long-run uptrend. Avoid one-day \
+  spikes with no follow-through story, and avoid chasing extended moves \
+  (extension below 3).
 - Each rationale must cite specific data (price levels, indicator values, \
   headlines).",
         max = config.max_candidates,
@@ -75,6 +80,7 @@ pub async fn run(ctx: &AgentCtx) -> Result<CandidateList> {
     ctx.recorded(AgentKind::Exploration, None, async |ctx| {
         let agent = ctx
             .builder(AgentKind::Exploration, None, &config.agent, preamble(ctx))?
+            .tool(ScanUniverse(ctx.clone()))
             .tool(ScreenMarket(ctx.clone()))
             .tool(GetPortfolio(ctx.clone()))
             .tool(ListResearch(ctx.clone()))

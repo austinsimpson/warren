@@ -156,6 +156,10 @@ pub struct ExecutorConfig {
     pub min_return_12_1_percent: f64,
     /// Open positions allowed at once.
     pub max_positions: usize,
+    /// Trading days before a position may be sold, unless its stop is hit
+    /// or research turns to sell: swapping positions often cost about 3% a
+    /// year in backtests.
+    pub min_hold_days: usize,
 }
 
 impl Default for ExecutorConfig {
@@ -171,6 +175,7 @@ impl Default for ExecutorConfig {
             max_percent_below_52w_high: 45.0,
             min_return_12_1_percent: -20.0,
             max_positions: 10,
+            min_hold_days: 10,
         }
     }
 }

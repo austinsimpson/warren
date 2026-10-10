@@ -28,6 +28,8 @@ pub struct Proposal {
     pub cash: f64,
     /// Positions the strategy holds now.
     pub open_positions: usize,
+    /// Trading days since the position in this symbol was opened, if held.
+    pub held_days: Option<usize>,
     pub orders_today: usize,
     /// Set for limit orders.
     pub limit_price: Option<f64>,
@@ -43,6 +45,7 @@ pub struct ResearchView {
     pub conviction: f64,
     /// Top of the report's entry range: buys may not be priced above it.
     pub entry_high: Option<f64>,
+    pub stop_loss: Option<f64>,
     /// Computed from current bars when the order is placed.
     pub trend_health: Option<TrendHealth>,
 }
@@ -120,6 +123,7 @@ pub fn check_risk(p: &Proposal, limits: &ExecutorConfig) -> Result<(), String> {
                     p.held_qty.max(0.0)
                 ));
             }
+            check_holding_period(p, limits)?;
         }
     }
     Ok(())
@@ -143,6 +147,30 @@ fn check_entry(p: &Proposal, entry_high: Option<f64>) -> Result<(), String> {
         )),
         _ => Ok(()),
     }
+}
+
+/// Positions are held at least `min_hold_days` trading days, unless the
+/// price is at or below the research stop or research turned to sell.
+fn check_holding_period(p: &Proposal, limits: &ExecutorConfig) -> Result<(), String> {
+    let Some(days) = p.held_days else {
+        return Ok(());
+    };
+    if days >= limits.min_hold_days {
+        return Ok(());
+    }
+    if let Some(research) = &p.research {
+        if matches!(research.rating, Rating::Sell | Rating::StrongSell) {
+            return Ok(());
+        }
+        if research.stop_loss.is_some_and(|stop| p.last_price <= stop) {
+            return Ok(());
+        }
+    }
+    Err(format!(
+        "held {days} of the {} trading days required before selling; sell early only when \
+         the price reaches the research stop or research rates it sell",
+        limits.min_hold_days
+    ))
 }
 
 /// Buys must not be in a broken long-run trend, and are refused when it
@@ -225,6 +253,10 @@ Hard limits (place_order enforces these and refuses violations):
 - No buys more than {max_below:.0}% below the 52-week high or with a 12-1 \
   month return below {min_mom:.0}% (the report's trend_health); these \
   broken trends kept lagging in backtests.
+- Hold each position at least {min_hold} trading days; sell earlier only when \
+  the price reaches the research stop or research rates it sell. Trading \
+  often cost about 3% a year in backtests, so do not swap a holding for a \
+  marginally better idea.
 - Buys need research rated buy/strong_buy with conviction >= {min_conv:.2}. \
   Conviction is computed from catalyst, news sentiment, setup quality, \
   extension, and reward-to-risk (0 = very bearish, 0.5 = neutral, 1 = very \
@@ -249,6 +281,7 @@ Lessons from your past decisions:
             "is disabled"
         },
         min_conv = limits.min_conviction_to_buy,
+        min_hold = limits.min_hold_days,
         max_below = limits.max_percent_below_52w_high,
         min_mom = limits.min_return_12_1_percent,
     ))
@@ -299,6 +332,7 @@ mod tests {
             equity: 100_000.0,
             cash: 100_000.0,
             open_positions: 0,
+            held_days: None,
             orders_today: 0,
             limit_price: Some(price),
             last_price: price,
@@ -306,6 +340,7 @@ mod tests {
                 rating: Rating::Buy,
                 conviction: 0.7,
                 entry_high: Some(price),
+                stop_loss: Some(price * 0.9),
                 trend_health: Some(HEALTHY),
             }),
         }
@@ -316,6 +351,7 @@ mod tests {
             rating,
             conviction,
             entry_high: Some(1_000.0),
+            stop_loss: None,
             trend_health: Some(HEALTHY),
         })
     }
@@ -328,6 +364,31 @@ mod tests {
         assert!(check_risk(&p, &limits).unwrap_err().contains("positions"));
         // Adding to a position already held is fine.
         p.held_qty = 5.0;
+        assert!(check_risk(&p, &limits).is_ok());
+    }
+
+    #[test]
+    fn holds_positions_for_the_minimum_period() {
+        let limits = ExecutorConfig::default();
+        let mut p = buy(5, 100.0);
+        p.side = OrderSide::Sell;
+        p.held_qty = 10.0;
+        p.held_days = Some(2);
+        assert!(
+            check_risk(&p, &limits)
+                .unwrap_err()
+                .contains("trading days")
+        );
+        // The stop (90) is hit.
+        p.last_price = 89.0;
+        assert!(check_risk(&p, &limits).is_ok());
+        // Research turned to sell.
+        p.last_price = 100.0;
+        p.research.as_mut().unwrap().rating = Rating::Sell;
+        assert!(check_risk(&p, &limits).is_ok());
+        // Held long enough.
+        p.research.as_mut().unwrap().rating = Rating::Buy;
+        p.held_days = Some(limits.min_hold_days);
         assert!(check_risk(&p, &limits).is_ok());
     }
 

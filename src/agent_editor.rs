@@ -451,6 +451,15 @@ impl Render for AgentEditor {
                 |v| format!("{v:.0}")
             ))
             .child(limit!(
+                "hold",
+                "Min hold (days)",
+                min_hold_days,
+                1,
+                0,
+                60,
+                |v| format!("{v:.0}")
+            ))
+            .child(limit!(
                 "nord",
                 "Orders per day",
                 max_orders_per_day,

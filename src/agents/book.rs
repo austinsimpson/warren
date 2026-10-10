@@ -33,6 +33,8 @@ pub struct Holding {
     pub avg_cost: f64,
     /// Last trade, when known.
     pub price: Option<f64>,
+    /// When the order that opened the position was placed.
+    pub opened_at: chrono::DateTime<chrono::Utc>,
 }
 
 impl Holding {
@@ -59,7 +61,8 @@ impl Book {
             cash: strategy.budget,
             ..Book::default()
         };
-        let mut lots: HashMap<String, (f64, f64)> = HashMap::new(); // qty, avg cost
+        // qty, avg cost, opened at
+        let mut lots: HashMap<String, (f64, f64, chrono::DateTime<chrono::Utc>)> = HashMap::new();
         for order in orders
             .iter()
             .filter(|o| o.client_order_id.starts_with(&prefix))
@@ -81,9 +84,14 @@ impl Book {
             if qty <= 0.0 {
                 continue;
             }
-            let lot = lots.entry(order.symbol.clone()).or_insert((0.0, 0.0));
+            let lot = lots
+                .entry(order.symbol.clone())
+                .or_insert((0.0, 0.0, order.created_at));
             match order.side {
                 OrderSide::Buy => {
+                    if lot.0 <= 1e-9 {
+                        lot.2 = order.created_at;
+                    }
                     lot.1 = (lot.0 * lot.1 + qty * fill) / (lot.0 + qty);
                     lot.0 += qty;
                     book.cash -= qty * fill;
@@ -97,12 +105,13 @@ impl Book {
         }
         book.positions = lots
             .into_iter()
-            .filter(|(_, (qty, _))| *qty > 1e-9)
-            .map(|(symbol, (qty, avg_cost))| Holding {
+            .filter(|(_, (qty, _, _))| *qty > 1e-9)
+            .map(|(symbol, (qty, avg_cost, opened_at))| Holding {
                 price: prices.get(&symbol).copied(),
                 symbol,
                 qty,
                 avg_cost,
+                opened_at,
             })
             .collect();
         book.positions.sort_by(|a, b| a.symbol.cmp(&b.symbol));
@@ -147,6 +156,10 @@ impl Book {
     /// Cash not committed to open buy orders.
     pub fn available_cash(&self) -> f64 {
         self.cash - self.reserved
+    }
+
+    pub fn holding(&self, symbol: &str) -> Option<&Holding> {
+        self.positions.iter().find(|h| h.symbol == symbol)
     }
 
     pub fn held(&self, symbol: &str) -> f64 {

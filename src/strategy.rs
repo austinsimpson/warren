@@ -81,6 +81,7 @@ impl RiskTolerance {
                 min_cash_percent: 20.0,
                 max_positions: 8,
                 max_orders_per_day: 6,
+                min_hold_days: 20,
                 min_conviction_to_buy: 0.65,
                 max_percent_below_52w_high: 30.0,
                 min_return_12_1_percent: -10.0,
@@ -91,6 +92,7 @@ impl RiskTolerance {
                 min_cash_percent: 10.0,
                 max_positions: 10,
                 max_orders_per_day: 10,
+                min_hold_days: 10,
                 min_conviction_to_buy: 0.6,
                 max_percent_below_52w_high: 45.0,
                 min_return_12_1_percent: -20.0,
@@ -101,6 +103,7 @@ impl RiskTolerance {
                 min_cash_percent: 5.0,
                 max_positions: 8,
                 max_orders_per_day: 15,
+                min_hold_days: 3,
                 min_conviction_to_buy: 0.55,
                 max_percent_below_52w_high: 60.0,
                 min_return_12_1_percent: -35.0,
@@ -117,6 +120,9 @@ pub struct Limits {
     pub min_cash_percent: f64,
     pub max_positions: usize,
     pub max_orders_per_day: usize,
+    /// Trading days a position is held before it may be sold, unless its
+    /// stop is hit or research turns to sell.
+    pub min_hold_days: usize,
     pub min_conviction_to_buy: f64,
     pub max_percent_below_52w_high: f64,
     pub min_return_12_1_percent: f64,
@@ -131,6 +137,7 @@ pub struct LimitOverrides {
     pub min_cash_percent: Option<f64>,
     pub max_positions: Option<usize>,
     pub max_orders_per_day: Option<usize>,
+    pub min_hold_days: Option<usize>,
     pub min_conviction_to_buy: Option<f64>,
     pub max_percent_below_52w_high: Option<f64>,
     pub min_return_12_1_percent: Option<f64>,
@@ -149,6 +156,7 @@ impl LimitOverrides {
             min_cash_percent: keep(self.min_cash_percent, preset.min_cash_percent),
             max_positions: keep(self.max_positions, preset.max_positions),
             max_orders_per_day: keep(self.max_orders_per_day, preset.max_orders_per_day),
+            min_hold_days: keep(self.min_hold_days, preset.min_hold_days),
             min_conviction_to_buy: keep(self.min_conviction_to_buy, preset.min_conviction_to_buy),
             max_percent_below_52w_high: keep(
                 self.max_percent_below_52w_high,
@@ -170,6 +178,7 @@ impl LimitOverrides {
             min_cash_percent: self.min_cash_percent.unwrap_or(preset.min_cash_percent),
             max_positions: self.max_positions.unwrap_or(preset.max_positions),
             max_orders_per_day: self.max_orders_per_day.unwrap_or(preset.max_orders_per_day),
+            min_hold_days: self.min_hold_days.unwrap_or(preset.min_hold_days),
             min_conviction_to_buy: self
                 .min_conviction_to_buy
                 .unwrap_or(preset.min_conviction_to_buy),
@@ -402,6 +411,7 @@ impl Strategy {
                 max_percent_below_52w_high: limits.max_percent_below_52w_high,
                 min_return_12_1_percent: limits.min_return_12_1_percent,
                 max_positions: limits.max_positions,
+                min_hold_days: limits.min_hold_days,
             },
             ..global.clone()
         }

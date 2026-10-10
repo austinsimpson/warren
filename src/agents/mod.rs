@@ -14,6 +14,7 @@ pub mod executor;
 pub mod exploration;
 pub mod jev;
 pub mod research;
+pub mod scan;
 pub mod scoring;
 pub mod technicals;
 pub mod tools;
