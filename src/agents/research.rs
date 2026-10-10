@@ -1,7 +1,7 @@
-//! The research agent: an in-depth swing-trading analysis of one symbol,
-//! returned as a typed [`ResearchReport`].
-
-use std::fmt;
+//! The research agent: an in-depth analysis of one symbol, returned as a
+//! typed [`ResearchReport`]: the thesis, risks, levels, dated news
+//! highlights, and factor scores, all context for the executor, which makes
+//! every trading decision itself.
 
 use anyhow::{Result, anyhow};
 use chrono::{DateTime, Utc};
@@ -17,35 +17,6 @@ use super::{
 };
 use std::future::IntoFuture;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[schemars(crate = "rig_core::schemars")]
-#[serde(rename_all = "snake_case")]
-pub enum Rating {
-    StrongBuy,
-    Buy,
-    Hold,
-    Sell,
-    StrongSell,
-}
-
-impl Rating {
-    pub fn is_buy(self) -> bool {
-        matches!(self, Self::StrongBuy | Self::Buy)
-    }
-}
-
-impl fmt::Display for Rating {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
-            Self::StrongBuy => "strong_buy",
-            Self::Buy => "buy",
-            Self::Hold => "hold",
-            Self::Sell => "sell",
-            Self::StrongSell => "strong_sell",
-        })
-    }
-}
-
 /// What the model produces.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[schemars(crate = "rig_core::schemars")]
@@ -56,8 +27,12 @@ pub struct ResearchFindings {
     pub thesis: String,
     /// Specific upcoming events or drivers that could move the stock.
     pub catalysts: Vec<String>,
-    /// What would make the thesis wrong.
+    /// The key risks, most serious first: what could go wrong, how likely
+    /// it looks, and what would show it happening.
     pub risks: Vec<String>,
+    /// The stock's most important recent news, newest first.
+    #[serde(default)]
+    pub news_highlights: Vec<NewsHighlight>,
     /// Lower bound of a sensible entry range, if buying.
     pub entry_low: Option<f64>,
     /// Upper bound of a sensible entry range, if buying.
@@ -75,18 +50,30 @@ pub struct ResearchFindings {
     pub factors: JudgedFactors,
 }
 
-/// Bump when scoring changes so reports scored differently are not compared
-/// as if they were the same scale.
-///
-/// - 1: every factor in conviction.
-/// - 2: trend, momentum, and relative strength moved to context; see
-///   [`scoring`](super::scoring). Version 1 reports are rescored on load,
-///   since conviction is computed from the factors they stored.
-pub const SCORING_VERSION: u32 = 2;
+/// One dated news item and why it matters.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[schemars(crate = "rig_core::schemars")]
+pub struct NewsHighlight {
+    /// YYYY-MM-DD.
+    pub date: String,
+    pub headline: String,
+    /// One sentence: what it means for the stock and whether the price
+    /// already reflects it.
+    pub significance: String,
+}
 
-/// How broken a stock's long-run trend is. Among stocks like the ones
-/// exploration screens, those far below their 52-week high or down over
-/// the past year (skipping the last month) kept lagging; see `backtest`.
+/// Bump when the report format or factor definitions change.
+///
+/// - 1: conviction from every factor.
+/// - 2: trend, momentum, and relative strength out of conviction.
+/// - 3: no conviction or rating; factors are context, and the executor
+///   decides.
+pub const SCORING_VERSION: u32 = 3;
+
+/// How broken a stock's long-run trend is, as context. Among stocks like the
+/// ones exploration screens, those far below their 52-week high or down
+/// over the past year (skipping the last month) kept lagging; see
+/// `backtest`.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct TrendHealth {
     pub percent_below_52w_high: f64,
@@ -103,19 +90,6 @@ impl TrendHealth {
     }
 }
 
-impl ResearchReport {
-    /// Rescore a report from an older scoring version whose factors carry
-    /// over, so its conviction is on today's scale. Others are unchanged.
-    pub fn upgraded(mut self) -> Self {
-        if self.scoring_version == 1 {
-            self.conviction = scoring::conviction(&self.factors);
-            self.rating = scoring::rating_for(self.conviction);
-            self.scoring_version = SCORING_VERSION;
-        }
-        self
-    }
-}
-
 /// A stored report: the findings, the scores computed from them, and when and
 /// at what price they were made.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -124,22 +98,18 @@ pub struct ResearchReport {
     pub generated_at: DateTime<Utc>,
     pub model: String,
     pub price_at_research: Option<f64>,
-    /// The [`SCORING_VERSION`] that produced `rating` and `conviction`.
+    /// The [`SCORING_VERSION`] the report was written under.
     #[serde(default)]
     pub scoring_version: u32,
-    pub rating: Rating,
-    /// Computed: 0 = maximally bearish, 0.5 = neutral, 1 = maximally bullish.
-    pub conviction: f64,
     /// Computed reward-to-risk of the entry, target, and stop, if a long setup.
     pub risk_reward: Option<f64>,
-    /// Every factor behind the conviction, computed and judged.
+    /// Every factor, computed and judged.
     pub factors: FactorScores,
-    /// Long-run price health the executor's buy vetoes check; absent on
-    /// reports written before it was recorded.
+    /// Long-run price health; absent on reports written before it was
+    /// recorded.
     #[serde(default)]
     pub trend_health: Option<TrendHealth>,
     /// Jev's scores for the same judgment factors, recorded for comparison.
-    /// They do not affect conviction.
     #[serde(default)]
     pub shadow: Option<ShadowScores>,
     pub findings: ResearchFindings,
@@ -148,9 +118,9 @@ pub struct ResearchReport {
 const PREAMBLE: &str = "\
 You are the research analyst for one of Warren's autonomous trading agents \
 (US equities, long-biased; its holding period and universe are below). You write \
-one in-depth report on one stock. An executor agent will size and place real \
-(paper) trades from your rating, conviction, entry range, target, and stop, \
-so be calibrated and specific.
+one in-depth report on one stock. An executor agent decides whether and how to \
+trade from your report, so be specific, calibrated, and candid about risk. You \
+do not make the decision and give no rating.
 
 Process:
 1. get_asset to confirm it is an active, tradable listed equity.
@@ -159,30 +129,30 @@ Process:
    resistance, recent breakouts or breakdowns, gaps.
 4. get_news (about 14 days) for catalysts, earnings, guidance, and sentiment.
 
-Scoring: you do not choose a rating or conviction. Warren has already \
-computed trend, momentum, relative strength, and extension (how stretched \
-the price is) from price data (shown in the request); do not re-score them, \
-and keep extension out of setup quality, which is about chart structure. You score only catalyst, news \
-sentiment, and setup quality, each from 1 to 5 on its own evidence, \
-independently of the others and of your overall view: 1 = clearly bearish, \
-2 = leaning bearish, 3 = neutral or no signal, 4 = leaning bullish, \
-5 = clearly bullish. Use the full range when the data supports it; a 3 \
-should mean the evidence is genuinely mixed or absent. Give each score a \
-one-sentence reason citing the data. Warren computes conviction and the \
-rating from your three scores, extension, and the reward-to-risk of your \
-entry, target, and stop, so set those levels honestly. Trend, momentum, and \
-relative strength are context: useful for reading the chart, but not part \
-of conviction.
-
-Levels:
-- For a long setup, give an entry range, a target, and a stop below entry. \
-  Stops should sit beyond a meaningful level, roughly 1–2.5 ATR from entry. \
-  Targets should be reachable within the horizon given recent volatility.
-- If you would not buy, you may leave the levels empty.
+Report:
+- Thesis: the core argument in 2–4 sentences, for or against owning it now.
+- Risks: the key risks, most serious first. For each, what could go wrong, \
+  how likely it looks, and what would show it happening. Always include \
+  some, even for a strong setup.
+- News highlights: the 3–6 most important recent items, newest first, each \
+  dated, with what it means and whether the price already reflects it.
+- Levels: for a long setup, an entry range, a target, and a stop below \
+  entry. Stops should sit beyond a meaningful level, roughly 1–2.5 ATR from \
+  entry; targets should be reachable within the horizon. The executor may \
+  not buy above your entry range, so set it where buying makes sense rather \
+  than chasing. Leave levels empty if you see no long setup.
+- Factor scores: Warren has computed trend, momentum, relative strength, \
+  and extension (how stretched the price is), shown in the request; do not \
+  re-score them. Score catalyst, news sentiment, and setup quality (chart \
+  structure, not stretch) each from 1 to 5 on its own evidence: 1 = clearly \
+  bearish, 2 = leaning bearish, 3 = neutral or no signal, 4 = leaning \
+  bullish, 5 = clearly bullish, each with a one-sentence reason citing the \
+  data. These are context for the executor, not a verdict.
 
 Rules:
-- Ground every claim in tool data; cite indicator values and prices.
-- You have no fundamentals feed; do not invent financial figures.";
+- Ground every claim in tool data; cite indicator values, prices, and dates.
+- You have no fundamentals feed beyond what you find; do not invent \
+  financial figures.";
 
 /// Research `symbol`, store the report, and return it.
 pub async fn run(ctx: &AgentCtx, symbol: &str) -> Result<ResearchReport> {
@@ -274,16 +244,14 @@ pub async fn run(ctx: &AgentCtx, symbol: &str) -> Result<ResearchReport> {
                 .and_then(|s| s.get(&symbol).and_then(|s| s.last_price())),
         };
         let findings = response.output;
-        let (scored, factors) = scoring::score(&findings, quant, price);
+        let (risk_reward, factors) = scoring::score(&findings, quant, price);
         let report = ResearchReport {
             symbol: symbol.clone(),
             generated_at: ctx.now(),
             model: config.model.clone(),
             price_at_research: price,
             scoring_version: SCORING_VERSION,
-            rating: scored.rating,
-            conviction: scored.conviction,
-            risk_reward: scored.risk_reward,
+            risk_reward,
             factors,
             shadow,
             trend_health: Some(trend_health),
@@ -307,12 +275,14 @@ pub async fn run(ctx: &AgentCtx, symbol: &str) -> Result<ResearchReport> {
             1 => " · 1 web search".to_string(),
             n => format!(" · {n} web searches"),
         };
+        let levels = match (report.findings.entry_high, report.findings.stop_loss) {
+            (Some(entry), Some(stop)) => format!(" entry ≤{entry:.2} stop {stop:.2}"),
+            _ => " no long setup".to_string(),
+        };
         let summary = format!(
-            "{} {} conviction {:.2} [{}]{shadow}{searched}",
-            symbol,
-            report.rating,
-            report.conviction,
-            factors.join(" ")
+            "{symbol} [{}]{levels}, {} risks{shadow}{searched}",
+            factors.join(" "),
+            report.findings.risks.len(),
         );
         Ok((report, summary))
     })
@@ -385,11 +355,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn findings_schema_asks_for_factors_not_a_rating() {
+    fn findings_schema_asks_for_context_not_a_verdict() {
         let schema =
             serde_json::to_value(rig_core::schemars::schema_for!(ResearchFindings)).unwrap();
         let properties = &schema["properties"];
-        assert!(properties["factors"].is_object(), "{schema}");
+        for field in ["factors", "risks", "news_highlights", "thesis"] {
+            assert!(properties[field].is_object(), "{field}: {schema}");
+        }
         assert!(properties.get("rating").is_none() && properties.get("conviction").is_none());
     }
 }
@@ -457,10 +429,8 @@ mod batch {
                         .map(|(name, f)| format!("{name}={}", f.score))
                         .collect();
                     println!(
-                        "{:5} {:11} conv {:.3}  r/r {:>5}  {}  | jev {}",
+                        "{:5} r/r {:>5}  {}  | jev {}",
                         r.symbol,
-                        r.rating.to_string(),
-                        r.conviction,
                         r.risk_reward.map_or("-".into(), |rr| format!("{rr:.2}")),
                         scores.join(" "),
                         r.shadow.as_ref().map_or("-".into(), |s| format!(

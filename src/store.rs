@@ -14,10 +14,7 @@ use chrono::{DateTime, Local, Utc};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use crate::agents::{
-    AgentKind,
-    exploration::CandidateList,
-    jev::ShadowScores,
-    research::{ResearchReport, SCORING_VERSION},
+    AgentKind, exploration::CandidateList, jev::ShadowScores, research::ResearchReport,
     scoring::FactorScores,
 };
 use crate::market::alpaca::{OrderSide, OrderType};
@@ -46,8 +43,6 @@ pub struct JournalEntry {
     pub rationale: String,
     /// `generated_at` of the research report the decision relied on.
     pub research_generated_at: Option<DateTime<Utc>>,
-    pub research_rating: Option<String>,
-    pub research_conviction: Option<f64>,
     /// Factor scores behind that report, to learn which factors predict.
     #[serde(default)]
     pub research_factors: Option<FactorScores>,
@@ -132,7 +127,7 @@ impl Store {
         if !path.exists() {
             return Ok(None);
         }
-        Ok(read_json_file(&path).ok().map(ResearchReport::upgraded))
+        Ok(read_json_file(&path).ok())
     }
 
     /// The latest report for every researched symbol, newest first.
@@ -142,18 +137,20 @@ impl Store {
             let path = entry?.path();
             if path.extension().is_some_and(|ext| ext == "json") {
                 // Skip reports in an older format; see `report`.
-                reports.extend(read_json_file(&path).ok().map(ResearchReport::upgraded));
+                reports.extend(read_json_file(&path).ok());
             }
         }
         reports.sort_by(|a: &ResearchReport, b| b.generated_at.cmp(&a.generated_at));
         Ok(reports)
     }
 
-    /// Current-version history for every symbol, oldest first.
+    /// History for every symbol, oldest first: reports from scoring version
+    /// 1 on, whose factors share definitions. Unversioned early reports are
+    /// left out.
     pub fn all_report_history(&self) -> Result<Vec<ResearchReport>> {
         Ok(self
             .history_lines()?
-            .filter(|r| r.scoring_version == SCORING_VERSION)
+            .filter(|r| r.scoring_version >= 1)
             .collect())
     }
 
@@ -167,7 +164,6 @@ impl Store {
         let reports: Vec<ResearchReport> = text
             .lines()
             .filter_map(|line| serde_json::from_str(line).ok())
-            .map(ResearchReport::upgraded)
             .collect();
         Ok(reports.into_iter())
     }
@@ -354,13 +350,14 @@ mod tests {
     }
 
     #[test]
-    fn history_keeps_current_version_and_skips_bad_lines() {
+    fn history_keeps_versioned_reports_and_skips_bad_lines() {
         let (store, dir) = temp_store();
-        let live = crate::agents::test_support::sample_report("NU", SCORING_VERSION);
-        // Unversioned reports are skipped; version 1 is rescored.
+        let live = crate::agents::test_support::sample_report(
+            "NU",
+            crate::agents::research::SCORING_VERSION,
+        );
         let old = crate::agents::test_support::sample_report("NU", 0);
-        let mut v1 = crate::agents::test_support::sample_report("NU", 1);
-        v1.conviction = 0.9;
+        let v1 = crate::agents::test_support::sample_report("NU", 1);
         store.append_jsonl("research_history.jsonl", &old).unwrap();
         store.append_jsonl("research_history.jsonl", &v1).unwrap();
         store.append_jsonl("research_history.jsonl", &live).unwrap();
@@ -374,9 +371,7 @@ mod tests {
 
         let history = store.all_report_history().unwrap();
         assert_eq!(history.len(), 3, "unversioned report and bad line skipped");
-        assert!(history.iter().all(|r| r.scoring_version == SCORING_VERSION));
-        // The sample's scored factors are all 3: rescored to neutral.
-        assert_eq!(history[0].conviction, 0.5);
+        assert!(history.iter().all(|r| r.scoring_version >= 1));
         fs::remove_dir_all(dir).unwrap();
     }
 }

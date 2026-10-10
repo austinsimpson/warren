@@ -10,7 +10,7 @@ use rig_core::schemars::{self, JsonSchema};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use super::{AgentCtx, book::Book, executor, research::TrendHealth, scan, sweep, technicals};
+use super::{AgentCtx, book::Book, executor, scan, sweep, technicals};
 use crate::market::alpaca::{NewOrder, OrderSide, Timeframe};
 use crate::store::JournalEntry;
 
@@ -464,9 +464,9 @@ tool!(
     GetResearchReport,
     "get_research_report",
     SymbolArgs,
-    "The latest full research report for a symbol, including when it was written. Its \
-     trend, momentum, and relative_strength factors are context only, not part of \
-     conviction."
+    "The latest full research report for a symbol, including when it was written: \
+     thesis, risks, dated news highlights, levels, factor scores, and trend health. All \
+     of it is evidence for your decision, not a verdict."
 );
 
 impl GetResearchReport {
@@ -488,10 +488,10 @@ tool!(
     ListResearch,
     "list_research",
     NoArgs,
-    "One line per researched symbol: rating and conviction (both computed from the \
-     scored factors; conviction 0 = very bearish, 0.5 = neutral, 1 = very bullish), \
-     reward-to-risk, target, stop, report age, and the context factors (trend, \
-     momentum, relative strength), which are not in conviction."
+    "One line per researched symbol: the thesis, entry range, target, stop, \
+     reward-to-risk, factor scores (1 = very bearish, 5 = very bullish; context, not \
+     a verdict), the most serious risk, trend health, and report age. Read the full \
+     report with get_research_report before acting."
 );
 
 impl ListResearch {
@@ -502,21 +502,23 @@ impl ListResearch {
             .map(|r| {
                 json!({
                     "symbol": r.symbol,
-                    "rating": r.rating,
-                    "conviction": r.conviction,
-                    "risk_reward": r.risk_reward.map(round2),
+                    "thesis": r.findings.thesis,
                     "price_at_research": r.price_at_research,
+                    "entry_low": r.findings.entry_low,
+                    "entry_high": r.findings.entry_high,
                     "target_price": r.findings.target_price,
                     "stop_loss": r.findings.stop_loss,
+                    "risk_reward": r.risk_reward.map(round2),
                     "horizon_days": r.findings.horizon_days,
-                    "age_hours": (Utc::now() - r.generated_at).num_hours(),
-                    "trend_health": r.trend_health,
-                    "context": r
+                    "factors": r
                         .factors
-                        .context()
+                        .named()
                         .into_iter()
                         .map(|(name, f)| (name.to_string(), json!(f.score)))
                         .collect::<serde_json::Map<_, _>>(),
+                    "top_risk": r.findings.risks.first(),
+                    "trend_health": r.trend_health,
+                    "age_hours": (Utc::now() - r.generated_at).num_hours(),
                 })
             })
             .collect();
@@ -551,6 +553,7 @@ impl GetPortfolio {
                     "market_value": round2(h.market_value()),
                     "unrealized_pl": round2(h.unrealized_pl()),
                     "unrealized_pl_percent": round2(h.unrealized_pl() / (h.qty * h.avg_cost) * 100.0),
+                    "trading_days_held": trading_days_since(h.opened_at),
                     "percent_of_equity": round2(h.market_value() / equity * 100.0),
                 })
             })
@@ -618,8 +621,8 @@ impl GetRiskLimits {
             "max_orders_per_day": limits.max_orders_per_day,
             "orders_placed_today": used,
             "allow_short": limits.allow_short,
-            "min_conviction_to_buy": limits.min_conviction_to_buy,
-            "note": "Buys need a research report rated buy or strong_buy at or above min_conviction_to_buy.",
+            "note": "Buys need a research report and a price at or below its entry range; \
+                     every other decision is yours.",
         }))
     }
 }
@@ -791,16 +794,6 @@ impl PlaceOrder {
             .ok_or_else(|| ToolExecutionError::not_found(format!("no price for {symbol}")))?;
         let report = ctx.store.report(&symbol).map_err(failed)?;
         // Judged on today's bars, not the report's, which can be a day old.
-        let trend_health = match side {
-            OrderSide::Buy => alpaca
-                .daily_history(&symbol, Utc::now() - Duration::days(550))
-                .await
-                .ok()
-                .and_then(|bars| technicals::compute(&bars))
-                .map(|t| TrendHealth::from_technicals(&t)),
-            OrderSide::Sell => None,
-        };
-
         let proposal = executor::Proposal {
             side,
             qty: args.qty,
@@ -810,18 +803,11 @@ impl PlaceOrder {
             equity: book.equity(),
             cash: book.available_cash(),
             open_positions: book.positions.len(),
-            held_days: book
-                .holding(&symbol)
-                .map(|h| trading_days_since(h.opened_at)),
             orders_today: orders_today(ctx).map_err(failed)?,
             limit_price: args.limit_price,
             last_price: price,
             research: report.as_ref().map(|r| executor::ResearchView {
-                rating: r.rating,
-                conviction: r.conviction,
                 entry_high: r.findings.entry_high,
-                stop_loss: r.findings.stop_loss,
-                trend_health,
             }),
         };
         executor::check_risk(&proposal, &ctx.config.executor)
@@ -859,8 +845,6 @@ impl PlaceOrder {
             benchmark_price_at_decision: snapshots.get(BENCHMARK).and_then(|s| s.last_price()),
             rationale: args.rationale,
             research_generated_at: report.as_ref().map(|r| r.generated_at),
-            research_rating: report.as_ref().map(|r| r.rating.to_string()),
-            research_conviction: report.as_ref().map(|r| r.conviction),
             research_factors: report.as_ref().map(|r| r.factors.clone()),
             research_shadow: report.as_ref().and_then(|r| r.shadow.clone()),
         };
@@ -932,7 +916,8 @@ tool!(
     "Your past decisions from the trade journal and how each has played out: fill price, \
      return since the decision, SPY's return over the same span, and the excess return. \
      For sells, return is the move you avoided (positive means the price fell after you sold). \
-     Includes the rationale and research rating you acted on, plus aggregate hit rate."
+     Includes the rationale and research factor scores you acted on, plus aggregate hit \
+     rate."
 );
 
 impl ReviewTradeHistory {
@@ -997,8 +982,6 @@ impl ReviewTradeHistory {
                     "return_percent": ret.map(round2),
                     "spy_return_percent": bench.map(round2),
                     "excess_return_percent": excess.map(round2),
-                    "research_rating": e.research_rating,
-                    "research_conviction": e.research_conviction,
                     "research_factors": e.research_factors.as_ref().map(|f| {
                         f.named()
                             .iter()

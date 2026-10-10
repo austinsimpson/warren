@@ -1,7 +1,7 @@
 //! Shadow scoring with TypeSafe's Jev. Jev scores catalyst and news sentiment
 //! from the raw headlines on the same 1–5 scale the research agent uses.
-//! Shadow scores are recorded next to the agent's scores but do not feed
-//! conviction, so the two can be compared against outcomes before either is
+//! Shadow scores are recorded next to the agent's scores and shown to the
+//! executor, so the two can be compared against outcomes before either is
 //! trusted over the other.
 
 use anyhow::{Context as _, Result};

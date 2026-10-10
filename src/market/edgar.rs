@@ -115,9 +115,8 @@ impl EdgarClient {
         unit: &str,
         period: &str,
     ) -> Result<Vec<(u64, Option<String>, String, f64)>> {
-        let url = format!(
-            "https://data.sec.gov/api/xbrl/frames/{taxonomy}/{tag}/{unit}/{period}.json"
-        );
+        let url =
+            format!("https://data.sec.gov/api/xbrl/frames/{taxonomy}/{tag}/{unit}/{period}.json");
         let json: serde_json::Value = match self.get_json(&url).await {
             Ok(json) => json,
             // Periods nobody reported under this tag are 404s.

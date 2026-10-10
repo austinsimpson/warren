@@ -14,7 +14,7 @@ use crate::agents::{
     AgentCtx, AgentEvent, AgentKind, EventKind,
     autopilot::{Autopilot, Control},
     exploration::CandidateList,
-    research::{Rating, ResearchReport},
+    research::ResearchReport,
 };
 use crate::config::Config;
 use crate::market::alpaca::AlpacaClient;
@@ -34,8 +34,6 @@ pub struct AgentsState {
     events: VecDeque<AgentEvent>,
     pub reports: HashMap<String, ResearchReport>,
     pub candidates: Option<CandidateList>,
-    /// Current-version research history per symbol, oldest first.
-    history: HashMap<String, Vec<(chrono::DateTime<chrono::Utc>, f64, Rating)>>,
     runs_today: usize,
     /// Token and dollar totals from the run log.
     pub usage: crate::scorecard::Usage,
@@ -56,16 +54,6 @@ impl AgentsState {
     fn reload(&mut self) {
         if let Ok(reports) = self.ctx.store.reports() {
             self.reports = reports.into_iter().map(|r| (r.symbol.clone(), r)).collect();
-        }
-        if let Ok(history) = self.ctx.store.all_report_history() {
-            self.history.clear();
-            for report in history {
-                self.history.entry(report.symbol).or_default().push((
-                    report.generated_at,
-                    report.conviction,
-                    report.rating,
-                ));
-            }
         }
         if let Ok(candidates) = self.ctx.store.candidates() {
             self.candidates = candidates;
@@ -149,7 +137,6 @@ impl AgentsState {
             events: VecDeque::new(),
             reports: HashMap::new(),
             candidates: None,
-            history: HashMap::new(),
             runs_today: 0,
             usage: Default::default(),
             running: Vec::new(),
@@ -333,12 +320,13 @@ impl Warren {
             .children(lines)
     }
 
-    /// Rating, conviction, levels, and thesis for the selected symbol.
+    /// The selected symbol's research: levels, factor scores and trend
+    /// health as context, the thesis, the top risks, and news highlights.
+    /// There is no verdict; the executor decides.
     pub fn render_research_card(&self) -> Option<Div> {
         let agents = self.agent()?;
         let report = agents.reports.get(&self.selected)?;
         let f = &report.findings;
-        let color = rating_color(report.rating);
         let level = |name: &'static str, value: Option<f64>| {
             value.map(|v| {
                 div()
@@ -353,6 +341,11 @@ impl Warren {
             .entry_low
             .zip(f.entry_high)
             .map(|(lo, hi)| format!("{lo:.2}–{hi:.2}"));
+        let (badge, color) = if f.entry_high.is_some() {
+            ("LONG SETUP", ACCENT)
+        } else {
+            ("NO SETUP", MUTED)
+        };
         let age = chrono::Utc::now() - report.generated_at;
         let age = if age.num_hours() >= 24 {
             format!("{}d ago", age.num_days())
@@ -360,6 +353,16 @@ impl Warren {
             format!("{}h ago", age.num_hours())
         } else {
             format!("{}m ago", age.num_minutes().max(0))
+        };
+        let line = |text: String, color: u32| {
+            div()
+                .w_full()
+                .min_w_0()
+                .truncate()
+                .font_family(SANS)
+                .text_size(px(TEXT_SM))
+                .text_color(rgb(color))
+                .child(text)
         };
 
         Some(
@@ -390,17 +393,7 @@ impl Warren {
                                 .bg(tint(color, 0.12))
                                 .text_color(rgb(color))
                                 .font_weight(FontWeight::BOLD)
-                                .child(report.rating.to_string().replace('_', " ").to_uppercase()),
-                        )
-                        .child(
-                            div()
-                                .flex()
-                                .flex_row()
-                                .items_center()
-                                .gap_1()
-                                .child(label("conv"))
-                                .child(conviction_bar(report.conviction))
-                                .child(format!("{:.2}", report.conviction)),
+                                .child(badge),
                         )
                         .children(entry.map(|e| {
                             div()
@@ -412,6 +405,14 @@ impl Warren {
                         }))
                         .children(level("target", f.target_price))
                         .children(level("stop", f.stop_loss))
+                        .children(report.risk_reward.map(|rr| {
+                            div()
+                                .flex()
+                                .flex_row()
+                                .gap_1()
+                                .child(label("r/r"))
+                                .child(format!("{rr:.1}:1"))
+                        }))
                         .child(label(format!("{}d · {age}", f.horizon_days))),
                 )
                 .child(
@@ -421,13 +422,8 @@ impl Warren {
                         .flex_wrap()
                         .gap_x_2()
                         .text_size(px(TEXT_XS))
-                        .children(report.factors.scored().into_iter().map(|(name, factor)| {
-                            // The r/r chip also shows the ratio behind its score,
-                            // and judged factors show Jev's shadow score.
-                            let ratio = (name == "r/r")
-                                .then_some(report.risk_reward)
-                                .flatten()
-                                .map(|rr| label(format!("{rr:.1}:1")));
+                        .children(report.factors.named().into_iter().map(|(name, factor)| {
+                            // Judged factors also show Jev's shadow score.
                             let shadow = report.shadow.as_ref().and_then(|s| match name {
                                 "catalyst" => Some(&s.catalyst),
                                 "news" => Some(&s.news_sentiment),
@@ -444,44 +440,18 @@ impl Warren {
                                         .text_color(rgb(score_color(factor.score)))
                                         .child(factor.score.to_string()),
                                 )
-                                .children(ratio)
                                 .children(shadow)
                         }))
-                        // Shown, but not part of conviction.
-                        .child(
-                            div()
-                                .flex()
-                                .flex_row()
-                                .gap_1()
-                                .child(label("context"))
-                                .children(report.factors.context().into_iter().map(
-                                    |(name, factor)| label(format!("{name} {}", factor.score)),
-                                )),
-                        )
                         .children(report.trend_health.map(|health| {
-                            // Red when the executor would refuse to buy.
-                            let vetoed = crate::agents::executor::check_trend_health(
-                                Some(health),
-                                &agents.ctx.config.executor,
-                            )
-                            .is_err();
-                            let text = format!(
+                            label(format!(
                                 "52w high -{:.0}%{}",
                                 health.percent_below_52w_high,
                                 health
                                     .return_12_1_percent
                                     .map_or(String::new(), |r| format!(" · 12-1m {r:+.0}%")),
-                            );
-                            div()
-                                .text_color(if vetoed { rgb(RED) } else { rgb(MUTED) })
-                                .child(if vetoed {
-                                    format!("{text} · no buys")
-                                } else {
-                                    text
-                                })
+                            ))
                         })),
                 )
-                .children(self.render_conviction_history())
                 .child(
                     div()
                         .w_full()
@@ -491,66 +461,18 @@ impl Warren {
                         .line_clamp(2)
                         .text_ellipsis()
                         .child(f.thesis.clone()),
-                ),
-        )
-    }
-
-    /// Conviction across every report on the selected symbol, with the change
-    /// since the first and the buy threshold for reference.
-    fn render_conviction_history(&self) -> Option<Div> {
-        let agents = self.agent()?;
-        let history = agents.history.get(&self.selected)?;
-        let (first, last) = (history.first()?, history.last()?);
-        let change = last.1 - first.1;
-        let (change_text, change_color) = if history.len() < 2 {
-            ("first report".to_string(), MUTED)
-        } else if change.abs() < 0.005 {
-            (format!("{:.2} → {:.2}, unchanged", first.1, last.1), MUTED)
-        } else {
-            (
-                format!("{:.2} → {:.2} ({change:+.2})", first.1, last.1),
-                if change > 0.0 { GREEN } else { RED },
-            )
-        };
-        let since = first.0.with_timezone(&Local).format("%b %-d");
-        let points = history
-            .iter()
-            .map(|(at, conviction, rating)| crate::chart::ConvictionPoint {
-                at: *at,
-                conviction: *conviction,
-                color: rating_color(*rating),
-            })
-            .collect();
-        let threshold = agents.ctx.config.executor.min_conviction_to_buy;
-
-        Some(
-            div()
-                .flex()
-                .flex_col()
-                .gap_0p5()
-                .child(
-                    div()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap_2()
-                        .text_size(px(TEXT_XS))
-                        .child(label("conviction history"))
-                        .child(div().text_color(rgb(change_color)).child(change_text))
-                        .child(div().flex_1())
-                        .child(label(format!(
-                            "{} report{} since {since}",
-                            history.len(),
-                            if history.len() == 1 { "" } else { "s" }
-                        ))),
                 )
-                .child(
-                    div()
-                        .h(px(44.))
-                        .w_full()
-                        .rounded_sm()
-                        .bg(tint(BORDER, 0.35))
-                        .child(crate::chart::conviction_history(points, threshold)),
+                .children(
+                    f.risks
+                        .iter()
+                        .take(2)
+                        .map(|risk| line(format!("▲ {risk}"), RED)),
+                )
+                .children(
+                    f.news_highlights
+                        .iter()
+                        .take(2)
+                        .map(|news| line(format!("{} · {}", news.date, news.headline), MUTED)),
                 ),
         )
     }
@@ -573,14 +495,6 @@ impl Warren {
     }
 }
 
-fn rating_color(rating: Rating) -> u32 {
-    match rating {
-        Rating::StrongBuy | Rating::Buy => GREEN,
-        Rating::Hold => WARNING,
-        Rating::Sell | Rating::StrongSell => RED,
-    }
-}
-
 /// Bearish factor scores in red, neutral muted, bullish in green.
 fn score_color(score: u8) -> u32 {
     match score {
@@ -588,22 +502,6 @@ fn score_color(score: u8) -> u32 {
         3 => MUTED,
         _ => GREEN,
     }
-}
-
-fn conviction_bar(conviction: f64) -> Div {
-    let width = 40.;
-    div()
-        .w(px(width))
-        .h(px(4.))
-        .rounded_full()
-        .bg(rgb(SELECTED))
-        .child(
-            div()
-                .h_full()
-                .w(px(width * conviction.clamp(0.0, 1.0) as f32))
-                .rounded_full()
-                .bg(rgb(ACCENT)),
-        )
 }
 
 fn agent_color(agent: Option<AgentKind>) -> u32 {

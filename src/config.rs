@@ -158,21 +158,8 @@ pub struct ExecutorConfig {
     pub min_cash_percent: f64,
     /// Allow selling short. When false, sells are capped at shares held.
     pub allow_short: bool,
-    /// Minimum research conviction (0–1) required to open a new position.
-    pub min_conviction_to_buy: f64,
-    /// Refuse buys further than this below the 52-week high. Among names
-    /// like exploration's, the bottom fifth (about 44% or more below) kept
-    /// lagging in backtests.
-    pub max_percent_below_52w_high: f64,
-    /// Refuse buys whose 12-1 month return is below this. The bottom fifth
-    /// (about −22% or worse) kept lagging in backtests.
-    pub min_return_12_1_percent: f64,
     /// Open positions allowed at once.
     pub max_positions: usize,
-    /// Trading days before a position may be sold, unless its stop is hit
-    /// or research turns to sell: swapping positions often cost about 3% a
-    /// year in backtests.
-    pub min_hold_days: usize,
 }
 
 impl Default for ExecutorConfig {
@@ -184,11 +171,7 @@ impl Default for ExecutorConfig {
             max_orders_per_day: 10,
             min_cash_percent: 10.0,
             allow_short: false,
-            min_conviction_to_buy: 0.6,
-            max_percent_below_52w_high: 45.0,
-            min_return_12_1_percent: -20.0,
             max_positions: 10,
-            min_hold_days: 10,
         }
     }
 }

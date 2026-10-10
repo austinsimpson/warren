@@ -5,11 +5,7 @@
 use anyhow::{Result, anyhow};
 use chrono::Utc;
 
-use super::{
-    AgentCtx, AgentKind,
-    research::{Rating, TrendHealth},
-    tools::*,
-};
+use super::{AgentCtx, AgentKind, tools::*};
 use crate::config::ExecutorConfig;
 use crate::market::alpaca::OrderSide;
 
@@ -28,8 +24,6 @@ pub struct Proposal {
     pub cash: f64,
     /// Positions the strategy holds now.
     pub open_positions: usize,
-    /// Trading days since the position in this symbol was opened, if held.
-    pub held_days: Option<usize>,
     pub orders_today: usize,
     /// Set for limit orders.
     pub limit_price: Option<f64>,
@@ -41,13 +35,8 @@ pub struct Proposal {
 
 #[derive(Debug, Clone, Copy)]
 pub struct ResearchView {
-    pub rating: Rating,
-    pub conviction: f64,
     /// Top of the report's entry range: buys may not be priced above it.
     pub entry_high: Option<f64>,
-    pub stop_loss: Option<f64>,
-    /// Computed from current bars when the order is placed.
-    pub trend_health: Option<TrendHealth>,
 }
 
 /// Enforce the risk limits. The error explains which limit the order would
@@ -79,18 +68,13 @@ pub fn check_risk(p: &Proposal, limits: &ExecutorConfig) -> Result<(), String> {
             let covering_short = p.held_qty < 0.0;
             if !covering_short {
                 let Some(research) = p.research else {
-                    return Err("no research report for this symbol; buys need one".into());
+                    return Err(
+                        "no research report for this symbol; buys need one, since its entry \
+                         range caps the price"
+                            .into(),
+                    );
                 };
-                let (rating, conviction) = (research.rating, research.conviction);
-                if !rating.is_buy() || conviction < limits.min_conviction_to_buy {
-                    return Err(format!(
-                        "research rates it {rating} at conviction {conviction:.2}; buys \
-                         need buy or strong_buy at conviction >= {:.2}",
-                        limits.min_conviction_to_buy
-                    ));
-                }
                 check_entry(p, research.entry_high)?;
-                check_trend_health(research.trend_health, limits)?;
             }
             if p.held_qty <= 0.0 && p.open_positions >= limits.max_positions {
                 return Err(format!(
@@ -123,7 +107,6 @@ pub fn check_risk(p: &Proposal, limits: &ExecutorConfig) -> Result<(), String> {
                     p.held_qty.max(0.0)
                 ));
             }
-            check_holding_period(p, limits)?;
         }
     }
     Ok(())
@@ -149,58 +132,6 @@ fn check_entry(p: &Proposal, entry_high: Option<f64>) -> Result<(), String> {
     }
 }
 
-/// Positions are held at least `min_hold_days` trading days, unless the
-/// price is at or below the research stop or research turned to sell.
-fn check_holding_period(p: &Proposal, limits: &ExecutorConfig) -> Result<(), String> {
-    let Some(days) = p.held_days else {
-        return Ok(());
-    };
-    if days >= limits.min_hold_days {
-        return Ok(());
-    }
-    if let Some(research) = &p.research {
-        if matches!(research.rating, Rating::Sell | Rating::StrongSell) {
-            return Ok(());
-        }
-        if research.stop_loss.is_some_and(|stop| p.last_price <= stop) {
-            return Ok(());
-        }
-    }
-    Err(format!(
-        "held {days} of the {} trading days required before selling; sell early only when \
-         the price reaches the research stop or research rates it sell",
-        limits.min_hold_days
-    ))
-}
-
-/// Buys must not be in a broken long-run trend, and are refused when it
-/// can't be checked.
-pub fn check_trend_health(
-    health: Option<TrendHealth>,
-    limits: &ExecutorConfig,
-) -> Result<(), String> {
-    let Some(health) = health else {
-        return Err("no daily price history to check its long-run trend; buys need it".into());
-    };
-    if health.percent_below_52w_high > limits.max_percent_below_52w_high {
-        return Err(format!(
-            "it trades {:.0}% below its 52-week high; buys need it within {:.0}% (stocks this \
-             far down have kept lagging)",
-            health.percent_below_52w_high, limits.max_percent_below_52w_high
-        ));
-    }
-    if let Some(r) = health.return_12_1_percent
-        && r < limits.min_return_12_1_percent
-    {
-        return Err(format!(
-            "its 12-1 month return is {r:.0}%; buys need at least {:.0}% (stocks with \
-             weak 12-month momentum have kept lagging)",
-            limits.min_return_12_1_percent
-        ));
-    }
-    Ok(())
-}
-
 fn preamble(ctx: &AgentCtx) -> Result<String> {
     let limits = &ctx.config.executor;
     let lessons = ctx.store.lessons()?;
@@ -217,10 +148,11 @@ fn preamble(ctx: &AgentCtx) -> Result<String> {
         "\
 You are the executor for one of Warren's autonomous trading agents (US \
 equities; its holding period and universe are below). It trades its own \
-budget within an Alpaca paper account shared with other agents. \
-Research analysts write reports; you decide what to buy, hold, trim, or sell, \
-size the orders, and place them. Nobody reviews your orders before they go \
-out, so be deliberate.
+budget within an Alpaca paper account shared with other agents. You make \
+every trading decision: what to buy, hold, trim, or sell, how much, and \
+when. Research reports, prices, technicals, and news are your evidence; no \
+score decides for you. Nobody reviews your orders before they go out, so be \
+deliberate.
 
 Each run:
 1. review_trade_history (about 20 decisions) to see how your past calls \
@@ -228,51 +160,51 @@ Each run:
    record_lesson with a specific, actionable rule (at most two per run, and \
    do not repeat existing lessons).
 2. get_portfolio and get_risk_limits.
-3. list_research, then get_research_report for anything you might act on.
-4. Manage existing positions first: sell or trim when the stop is hit, the \
-   target is reached, the research turned to sell, or the thesis broke.
-5. Then consider new buys from reports rated buy or strong_buy with enough \
-   conviction, entering near the suggested entry range. Prefer limit orders \
-   near the current price; avoid chasing a stock well above its entry range.
-6. Cancel stale open orders that no longer fit the plan.
-7. Finish with a short summary of what you did and why, including decisions \
+3. list_research, then get_research_report for anything you might act on. \
+   Read the thesis, the risks, the news highlights, and the levels.
+4. Check what you need yourself: get_quotes, get_technicals, \
+   get_price_history, get_news. A report can be up to a day or two old.
+5. Manage existing positions first: decide whether each still deserves its \
+   place given its thesis, risks, stop, and how it has traded.
+6. Then decide on new buys. Weigh the evidence and the risks; it is fine \
+   to buy nothing.
+7. Cancel stale open orders that no longer fit the plan.
+8. Finish with a short summary of what you did and why, including decisions \
    not to trade.
 
-Sizing: risk roughly 0.5–1% of equity per trade, using the distance from \
-entry to the research stop, then cap by the limits below. Scale size with \
-conviction. Keep the book diversified; avoid piling into one theme.
+Judgment aids (yours to use, not rules):
+- Sizing: risking roughly 0.5–1% of equity per trade, from the distance to \
+  the research stop, keeps one bad call from hurting much; size up only for \
+  your strongest views. Keep the book diversified; avoid piling into one \
+  theme.
+- Factor scores (1 = very bearish, 5 = very bullish) are context. What the \
+  evidence says so far: in backtests over 2017–2026 and in replays of the \
+  research agent's own judgments, not buying stretched prices (extension) \
+  held up most consistently; trend, momentum, and relative strength showed \
+  no edge at horizons of a few weeks, and the strongest recent movers tended \
+  to reverse. The judged catalyst, news, and setup scores have not yet shown \
+  an edge either.
+- Trend health in reports (distance below the 52-week high, 12-1 month \
+  return): stocks far below their highs or down over the year kept lagging.
+- Trading often cost about 3% a year in backtests; don't swap a holding for \
+  a marginally better idea.
 
 Hard limits (place_order enforces these and refuses violations):
-- Max ${max_notional:.0} per order; max {max_pos:.1}% of equity per position.
+- Max ${max_notional:.0} per order; max {max_pos:.1}% of equity per position; at \
+  most {max_positions} positions.
 - Keep at least {min_cash:.1}% of equity in cash.
 - At most {max_orders} orders per day. Shorting {short}.
-- Buys must be priced at or below the top of the research entry range: a \
-  limit at or below it, or a market order only when the price is already \
-  inside or below it. Do not chase; if the price is above the range, place \
-  a resting limit order or wait.
-- No buys more than {max_below:.0}% below the 52-week high or with a 12-1 \
-  month return below {min_mom:.0}% (the report's trend_health); these \
-  broken trends kept lagging in backtests.
-- Hold each position at least {min_hold} trading days; sell earlier only when \
-  the price reaches the research stop or research rates it sell. Trading \
-  often cost about 3% a year in backtests, so do not swap a holding for a \
-  marginally better idea.
-- Buys need research rated buy/strong_buy with conviction >= {min_conv:.2}. \
-  Conviction is computed from catalyst, news sentiment, setup quality, \
-  extension, and reward-to-risk (0 = very bearish, 0.5 = neutral, 1 = very \
-  bullish).
-
-Context factors: reports also score trend, momentum, and relative strength, \
-but these are left out of conviction. Backtests over 2017–2026 found no edge \
-in them at horizons of two to four weeks, on large caps or on stocks like the ones \
-exploration screens; among recent big movers, the strongest relative \
-strength did worst. Use them to understand a chart, not as reasons to buy or \
-to size up. Extension (not chasing stretched prices) did hold up.
+- Only stocks within this agent's universe.
+- Buys need a research report, and must be priced at or below the top of \
+  its entry range: a limit at or below it, or a market order only when the \
+  price is already inside or below it. Do not chase; if the price is above \
+  the range, place a resting limit order or wait.
 
 Lessons from your past decisions:
 {lessons}",
         max_notional = limits.max_order_notional,
         max_pos = limits.max_position_percent,
+        max_positions = limits.max_positions,
         min_cash = limits.min_cash_percent,
         max_orders = limits.max_orders_per_day,
         short = if limits.allow_short {
@@ -280,10 +212,6 @@ Lessons from your past decisions:
         } else {
             "is disabled"
         },
-        min_conv = limits.min_conviction_to_buy,
-        min_hold = limits.min_hold_days,
-        max_below = limits.max_percent_below_52w_high,
-        min_mom = limits.min_return_12_1_percent,
     ))
 }
 
@@ -300,6 +228,9 @@ pub async fn run(ctx: &AgentCtx) -> Result<String> {
             .tool(ListResearch(ctx.clone()))
             .tool(GetResearchReport(ctx.clone()))
             .tool(GetQuotes(ctx.clone()))
+            .tool(GetTechnicals(ctx.clone()))
+            .tool(GetPriceHistory(ctx.clone()))
+            .tool(GetNews(ctx.clone()))
             .tool(PlaceOrder(ctx.clone()))
             .tool(CancelOrder(ctx.clone()))
             .build();
@@ -332,28 +263,13 @@ mod tests {
             equity: 100_000.0,
             cash: 100_000.0,
             open_positions: 0,
-            held_days: None,
             orders_today: 0,
             limit_price: Some(price),
             last_price: price,
             research: Some(ResearchView {
-                rating: Rating::Buy,
-                conviction: 0.7,
                 entry_high: Some(price),
-                stop_loss: Some(price * 0.9),
-                trend_health: Some(HEALTHY),
             }),
         }
-    }
-
-    fn view(rating: Rating, conviction: f64) -> Option<ResearchView> {
-        Some(ResearchView {
-            rating,
-            conviction,
-            entry_high: Some(1_000.0),
-            stop_loss: None,
-            trend_health: Some(HEALTHY),
-        })
     }
 
     #[test]
@@ -365,69 +281,6 @@ mod tests {
         // Adding to a position already held is fine.
         p.held_qty = 5.0;
         assert!(check_risk(&p, &limits).is_ok());
-    }
-
-    #[test]
-    fn holds_positions_for_the_minimum_period() {
-        let limits = ExecutorConfig::default();
-        let mut p = buy(5, 100.0);
-        p.side = OrderSide::Sell;
-        p.held_qty = 10.0;
-        p.held_days = Some(2);
-        assert!(
-            check_risk(&p, &limits)
-                .unwrap_err()
-                .contains("trading days")
-        );
-        // The stop (90) is hit.
-        p.last_price = 89.0;
-        assert!(check_risk(&p, &limits).is_ok());
-        // Research turned to sell.
-        p.last_price = 100.0;
-        p.research.as_mut().unwrap().rating = Rating::Sell;
-        assert!(check_risk(&p, &limits).is_ok());
-        // Held long enough.
-        p.research.as_mut().unwrap().rating = Rating::Buy;
-        p.held_days = Some(limits.min_hold_days);
-        assert!(check_risk(&p, &limits).is_ok());
-    }
-
-    const HEALTHY: TrendHealth = TrendHealth {
-        percent_below_52w_high: 5.0,
-        return_12_1_percent: Some(20.0),
-    };
-
-    #[test]
-    fn refuses_buys_in_broken_trends() {
-        let limits = ExecutorConfig::default();
-        let with = |health: Option<TrendHealth>| {
-            let mut p = buy(10, 100.0);
-            p.research.as_mut().unwrap().trend_health = health;
-            check_risk(&p, &limits)
-        };
-        assert!(with(Some(HEALTHY)).is_ok());
-        let far_below = TrendHealth {
-            percent_below_52w_high: 50.0,
-            ..HEALTHY
-        };
-        assert!(with(Some(far_below)).unwrap_err().contains("52-week high"));
-        let weak = TrendHealth {
-            return_12_1_percent: Some(-30.0),
-            ..HEALTHY
-        };
-        assert!(with(Some(weak)).unwrap_err().contains("12-1 month"));
-        let young = TrendHealth {
-            return_12_1_percent: None,
-            ..HEALTHY
-        };
-        assert!(with(Some(young)).is_ok());
-        assert!(with(None).unwrap_err().contains("price history"));
-        // Sells are never vetoed.
-        let mut sell = buy(10, 100.0);
-        sell.side = OrderSide::Sell;
-        sell.held_qty = 10.0;
-        sell.research.as_mut().unwrap().trend_health = Some(far_below);
-        assert!(check_risk(&sell, &limits).is_ok());
     }
 
     #[test]
@@ -495,14 +348,26 @@ mod tests {
     }
 
     #[test]
-    fn requires_bullish_research_to_buy() {
+    fn buys_need_research_but_no_verdict() {
         let mut p = buy(10, 100.0);
         p.research = None;
-        assert!(check_risk(&p, &ExecutorConfig::default()).is_err());
-        p.research = view(Rating::Buy, 0.4);
-        assert!(check_risk(&p, &ExecutorConfig::default()).is_err());
-        p.research = view(Rating::Hold, 0.9);
-        assert!(check_risk(&p, &ExecutorConfig::default()).is_err());
+        let err = check_risk(&p, &ExecutorConfig::default()).unwrap_err();
+        assert!(err.contains("no research report"), "{err}");
+        // Any report with an entry range will do: the decision is the
+        // executor's.
+        p.research = Some(ResearchView {
+            entry_high: Some(100.0),
+        });
+        assert_eq!(check_risk(&p, &ExecutorConfig::default()), Ok(()));
+    }
+
+    #[test]
+    fn sells_are_never_held_back() {
+        let mut p = buy(5, 100.0);
+        p.side = OrderSide::Sell;
+        p.held_qty = 10.0;
+        p.research = None;
+        assert_eq!(check_risk(&p, &ExecutorConfig::default()), Ok(()));
     }
 
     #[test]

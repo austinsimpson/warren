@@ -1,4 +1,6 @@
-//! Conviction is computed here, not chosen by the model.
+//! Factor scores: context for the executor, which makes every trading
+//! decision itself, and the measurements the scorecard tracks. Nothing here
+//! gates a trade.
 //!
 //! Factors are scored on a 1–5 bullishness scale (1 = very bearish, 3 =
 //! neutral, 5 = very bullish):
@@ -9,19 +11,16 @@
 //! - risk/reward is derived from the agent's entry, target, and stop, and the
 //!   price now.
 //!
-//! Conviction is the equal-weight mean of the scored factors that are
-//! available, rescaled to 0–1, and the rating follows from it. The scored
-//! factors are extension, catalyst, news sentiment, setup quality, and
-//! risk/reward. Trend, momentum, and relative strength are context only:
-//! backtests over 2017–2026, on large caps and on exploration's screen,
-//! found no edge in them at swing horizons (and among screened movers, the
-//! strongest relative strength did worst), while not buying extended names
-//! held up. They are still computed, shown, and tracked by the scorecard.
+//! What the evidence says, for the executor's context: in backtests over
+//! 2017–2026 and in point-in-time replays of the judged factors, not buying
+//! stretched prices (extension) held up most consistently; trend, momentum,
+//! and relative strength showed no edge at swing horizons, and the
+//! strongest recent movers tended to reverse.
 
 use rig_core::schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use super::research::{Rating, ResearchFindings};
+use super::research::ResearchFindings;
 use super::technicals::Technicals;
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -79,22 +78,6 @@ pub struct FactorScores {
 }
 
 impl FactorScores {
-    /// Available factors that feed conviction.
-    pub fn scored(&self) -> Vec<(&'static str, &FactorScore)> {
-        self.named()
-            .into_iter()
-            .filter(|(name, _)| !CONTEXT_FACTORS.contains(name))
-            .collect()
-    }
-
-    /// Available context factors: shown and tracked, but not in conviction.
-    pub fn context(&self) -> Vec<(&'static str, &FactorScore)> {
-        self.named()
-            .into_iter()
-            .filter(|(name, _)| CONTEXT_FACTORS.contains(name))
-            .collect()
-    }
-
     /// Every available factor in display order.
     pub fn named(&self) -> Vec<(&'static str, &FactorScore)> {
         [
@@ -113,27 +96,15 @@ impl FactorScores {
     }
 }
 
-/// Factors left out of conviction; see the module docs.
-pub const CONTEXT_FACTORS: [&str; 3] = ["trend", "momentum", "rel strength"];
-
-/// What the code derives from the findings.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-pub struct Scored {
-    pub rating: Rating,
-    /// 0 = maximally bearish, 0.5 = neutral, 1 = maximally bullish.
-    pub conviction: f64,
-    /// Reward to risk from the entry midpoint, for long setups.
-    pub risk_reward: Option<f64>,
-}
-
-/// Combine computed and judged factors and derive conviction and rating.
+/// Combine computed and judged factors, with risk/reward from the levels.
 /// `price_now` is the latest trade, used for risk/reward when the price has
-/// run above the entry range.
+/// run above the entry range. Returns the reward-to-risk ratio and every
+/// factor.
 pub fn score(
     findings: &ResearchFindings,
     quant: QuantFactors,
     price_now: Option<f64>,
-) -> (Scored, FactorScores) {
+) -> (Option<f64>, FactorScores) {
     let mut judged = findings.factors.clone();
     for factor in [
         &mut judged.catalyst,
@@ -142,46 +113,18 @@ pub fn score(
     ] {
         factor.score = factor.score.clamp(1, 5);
     }
-    let risk_reward = risk_reward(findings, price_now);
+    let ratio = risk_reward(findings, price_now);
     let factors = FactorScores {
         quant,
         judged,
-        risk_reward: risk_reward.map(|ratio| {
+        risk_reward: ratio.map(|ratio| {
             FactorScore::new(
                 risk_reward_to_score(ratio),
                 format!("{ratio:.2}:1 reward to risk from the expected fill"),
             )
         }),
     };
-
-    let conviction = conviction(&factors);
-    let scored = Scored {
-        rating: rating_for(conviction),
-        conviction,
-        risk_reward,
-    };
-    (scored, factors)
-}
-
-/// The mean of the scored factors, from 1–5 onto 0–1.
-pub fn conviction(factors: &FactorScores) -> f64 {
-    let scores: Vec<f64> = factors
-        .scored()
-        .iter()
-        .map(|(_, f)| f64::from(f.score))
-        .collect();
-    let mean = scores.iter().sum::<f64>() / scores.len() as f64;
-    ((mean - 1.0) / 4.0).clamp(0.0, 1.0)
-}
-
-pub fn rating_for(conviction: f64) -> Rating {
-    match conviction {
-        c if c >= 0.8 => Rating::StrongBuy,
-        c if c >= 0.6 => Rating::Buy,
-        c if c > 0.4 => Rating::Hold,
-        c if c > 0.2 => Rating::Sell,
-        _ => Rating::StrongSell,
-    }
+    (ratio, factors)
 }
 
 /// (target − entry) / (entry − stop) at the expected fill: the middle of the
@@ -405,6 +348,7 @@ mod tests {
             stop_loss: levels.2,
             technical_summary: String::new(),
             news_summary: String::new(),
+            news_highlights: vec![],
             factors: JudgedFactors {
                 catalyst,
                 news_sentiment: news,
@@ -449,63 +393,27 @@ mod tests {
     }
 
     #[test]
-    fn neutral_factors_without_levels_are_a_hold_at_half() {
-        let (s, factors) = score(&findings([3; 3], (None, None, None)), quant([3; 3]), None);
-        assert_eq!(s.conviction, 0.5);
-        assert_eq!(s.rating, Rating::Hold);
-        assert_eq!(factors.named().len(), 6);
-        assert_eq!(factors.scored().len(), 3);
-        assert_eq!(factors.context().len(), 3);
-    }
-
-    #[test]
-    fn scored_factors_weigh_equally() {
-        // Judged 4s, extension 2, r/r 3:1 → 5: mean 19/5.
-        let mut quant = quant([4; 3]);
-        quant.extension = Some(factor(2));
-        let (s, factors) = score(
+    fn every_factor_is_reported() {
+        let (ratio, factors) = score(
             &findings([4; 3], (Some(100.0), Some(130.0), Some(90.0))),
-            quant,
+            quant([4; 3]),
             None,
         );
-        assert_eq!(s.risk_reward, Some(3.0));
+        assert_eq!(ratio, Some(3.0));
         assert_eq!(factors.risk_reward.as_ref().unwrap().score, 5);
-        assert!((s.conviction - (19.0 / 5.0 - 1.0) / 4.0).abs() < 1e-12);
-        assert_eq!(s.rating, Rating::Buy);
+        // Three computed (no extension here), three judged, and r/r.
+        assert_eq!(factors.named().len(), 7);
     }
 
     #[test]
-    fn context_factors_do_not_move_conviction() {
-        let levels = (None, None, None);
-        let (bullish, _) = score(&findings([4; 3], levels), quant([5; 3]), None);
-        let (bearish, _) = score(&findings([4; 3], levels), quant([1; 3]), None);
-        assert_eq!(bullish.conviction, bearish.conviction);
-    }
-
-    #[test]
-    fn missing_quant_factors_are_left_out_not_neutral() {
-        let (s, factors) = score(
+    fn missing_factors_are_left_out() {
+        let (ratio, factors) = score(
             &findings([5; 3], (None, None, None)),
             QuantFactors::default(),
             None,
         );
+        assert_eq!(ratio, None);
         assert_eq!(factors.named().len(), 3);
-        assert_eq!(s.conviction, 1.0);
-    }
-
-    #[test]
-    fn poor_risk_reward_drags_conviction_down() {
-        let (good, _) = score(
-            &findings([4; 3], (Some(100.0), Some(130.0), Some(90.0))),
-            quant([4; 3]),
-            None,
-        );
-        let (poor, _) = score(
-            &findings([4; 3], (Some(100.0), Some(104.0), Some(90.0))),
-            quant([4; 3]),
-            None,
-        );
-        assert!(poor.conviction < good.conviction);
     }
 
     #[test]
@@ -517,14 +425,6 @@ mod tests {
         );
         assert_eq!(factors.judged.catalyst.score, 5);
         assert_eq!(factors.judged.news_sentiment.score, 1);
-    }
-
-    #[test]
-    fn rating_thresholds() {
-        assert_eq!(rating_for(0.6), Rating::Buy);
-        assert_eq!(rating_for(0.59), Rating::Hold);
-        assert_eq!(rating_for(0.4), Rating::Sell);
-        assert_eq!(rating_for(0.2), Rating::StrongSell);
     }
 
     #[test]
@@ -615,12 +515,12 @@ mod tests {
         // Entry 100 (range 100–100), target 130, stop 90.
         let f = findings([4; 3], (Some(100.0), Some(130.0), Some(90.0)));
         let (at_entry, _) = score(&f, quant([4; 3]), Some(99.0));
-        assert_eq!(at_entry.risk_reward, Some(3.0));
+        assert_eq!(at_entry, Some(3.0));
 
         // Range 100–104 and price 110: fill capped at 104 → 26/14.
         let mut f = f;
         f.entry_high = Some(104.0);
         let (ran, _) = score(&f, quant([4; 3]), Some(110.0));
-        assert!((ran.risk_reward.unwrap() - 26.0 / 14.0).abs() < 1e-12);
+        assert!((ran.unwrap() - 26.0 / 14.0).abs() < 1e-12);
     }
 }

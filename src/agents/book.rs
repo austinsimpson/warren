@@ -176,10 +176,6 @@ impl Book {
         self.sweep.as_ref().map_or(0.0, Holding::market_value)
     }
 
-    pub fn holding(&self, symbol: &str) -> Option<&Holding> {
-        self.positions.iter().find(|h| h.symbol == symbol)
-    }
-
     pub fn held(&self, symbol: &str) -> f64 {
         self.positions
             .iter()

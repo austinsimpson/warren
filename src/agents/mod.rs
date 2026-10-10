@@ -459,8 +459,6 @@ pub(crate) mod test_support {
             model: "test".into(),
             price_at_research: Some(10.0),
             scoring_version,
-            rating: research::Rating::Hold,
-            conviction: 0.5,
             risk_reward: None,
             factors: FactorScores {
                 quant: QuantFactors::default(),
@@ -480,6 +478,7 @@ pub(crate) mod test_support {
                 stop_loss: None,
                 technical_summary: String::new(),
                 news_summary: String::new(),
+                news_highlights: vec![],
                 factors: judged,
             },
         }

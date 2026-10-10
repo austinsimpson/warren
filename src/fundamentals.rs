@@ -90,10 +90,7 @@ fn quarterly(facts: &[Fact], as_of: NaiveDate) -> BTreeMap<NaiveDate, f64> {
             continue;
         }
         let start = year.start.expect("years have a start");
-        let inside: Vec<f64> = out
-            .range(start..year.end)
-            .map(|(_, v)| *v)
-            .collect();
+        let inside: Vec<f64> = out.range(start..year.end).map(|(_, v)| *v).collect();
         if inside.len() == 3 {
             out.insert(year.end, year.value - inside.iter().sum::<f64>());
         }
@@ -188,7 +185,11 @@ impl Series {
             (Some(n), Some(r)) if r > 0.0 => Some(n / r * 100.0),
             _ => None,
         };
-        let mut shares: Vec<&Fact> = self.shares.iter().filter(|f| f.available <= as_of).collect();
+        let mut shares: Vec<&Fact> = self
+            .shares
+            .iter()
+            .filter(|f| f.available <= as_of)
+            .collect();
         shares.sort_by_key(|f| f.end);
         if let Some(now) = shares.last() {
             m.shares_outstanding = Some(now.value);
@@ -413,9 +414,24 @@ mod tests {
         let mut revenue = vec![];
         for (year, base) in [(2024, 100.0), (2025, 150.0)] {
             let q = |n: u32| base + n as f64 * 10.0;
-            revenue.push(quarter(&format!("{year}-01-01"), &format!("{year}-03-31"), q(0), &format!("{year}-05-01")));
-            revenue.push(quarter(&format!("{year}-04-01"), &format!("{year}-06-30"), q(1), &format!("{year}-08-01")));
-            revenue.push(quarter(&format!("{year}-07-01"), &format!("{year}-09-30"), q(2), &format!("{year}-11-01")));
+            revenue.push(quarter(
+                &format!("{year}-01-01"),
+                &format!("{year}-03-31"),
+                q(0),
+                &format!("{year}-05-01"),
+            ));
+            revenue.push(quarter(
+                &format!("{year}-04-01"),
+                &format!("{year}-06-30"),
+                q(1),
+                &format!("{year}-08-01"),
+            ));
+            revenue.push(quarter(
+                &format!("{year}-07-01"),
+                &format!("{year}-09-30"),
+                q(2),
+                &format!("{year}-11-01"),
+            ));
             revenue.push(quarter(
                 &format!("{year}-01-01"),
                 &format!("{year}-12-31"),

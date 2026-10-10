@@ -451,15 +451,6 @@ impl Render for AgentEditor {
                 |v| format!("{v:.0}")
             ))
             .child(limit!(
-                "hold",
-                "Min hold (days)",
-                min_hold_days,
-                1,
-                0,
-                60,
-                |v| format!("{v:.0}")
-            ))
-            .child(limit!(
                 "nord",
                 "Orders per day",
                 max_orders_per_day,
@@ -467,33 +458,6 @@ impl Render for AgentEditor {
                 1,
                 100,
                 |v| format!("{v:.0}")
-            ))
-            .child(limit!(
-                "conv",
-                "Min conviction",
-                min_conviction_to_buy,
-                0.05,
-                0.3,
-                0.95,
-                |v| format!("{v:.2}")
-            ))
-            .child(limit!(
-                "high",
-                "Max below 52w high",
-                max_percent_below_52w_high,
-                5.0,
-                5.0,
-                95.0,
-                |v| format!("{v:.0}%")
-            ))
-            .child(limit!(
-                "mom",
-                "Min 12-1m return",
-                min_return_12_1_percent,
-                5.0,
-                -90.0,
-                50.0,
-                |v| format!("{v:+.0}%")
             ))
             .child(section("strategy"))
             .child(row("Horizon", segmented(horizon_choices)))

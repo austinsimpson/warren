@@ -218,10 +218,17 @@ fn score(report: &ResearchReport, name: &str) -> Option<f64> {
 
 const FACTOR_DEFS: [FactorDef; 13] = [
     FactorDef {
-        name: "conviction",
-        value: |r| Some(r.conviction),
-        high: 0.6,
-        low: 0.5,
+        // Whether research proposed a long setup at all (1) or not (0).
+        name: "long setup",
+        value: |r| {
+            Some(if r.findings.entry_high.is_some() {
+                1.0
+            } else {
+                0.0
+            })
+        },
+        high: 1.0,
+        low: 0.0,
     },
     FactorDef {
         name: "trend",
@@ -759,8 +766,6 @@ mod tests {
             benchmark_price_at_decision: Some(100.0),
             rationale: String::new(),
             research_generated_at: None,
-            research_rating: None,
-            research_conviction: None,
             research_factors: None,
             research_shadow: None,
         };

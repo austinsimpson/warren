@@ -1,7 +1,7 @@
 //! Point-in-time replay: run an agent's research as of past dates, with
 //! every data tool cut off at that moment, then score the reports against
 //! what happened next. This is the honest backtest of the judged factors
-//! (catalyst, news, setup) and of conviction, but only for dates after the
+//! (catalyst, news, setup) and of research's setups, but only for dates after the
 //! model's knowledge cutoff: before it, the model may simply remember what
 //! happened.
 //!
@@ -23,7 +23,7 @@ use anyhow::{Context as _, Result, bail};
 use chrono::{DateTime, Duration, NaiveDate, TimeZone as _, Utc};
 use futures::{StreamExt as _, stream};
 
-use crate::agents::{AgentCtx, research, research::Rating, tools::BENCHMARK};
+use crate::agents::{AgentCtx, research, tools::BENCHMARK};
 use crate::backtest::{BarCache, Screen, fetch_screened_pool};
 use crate::config::Config;
 use crate::market::alpaca::{AlpacaClient, Bar};
@@ -201,10 +201,13 @@ pub fn run_cli(args: &[String]) -> Result<()> {
                 .map(|(i, (date, symbol, result))| {
                     match &result {
                         Ok(r) => println!(
-                            "[{}/{total}] {date} {symbol}: {} {:.2}",
+                            "[{}/{total}] {date} {symbol}: {}",
                             i + 1,
-                            r.rating,
-                            r.conviction
+                            if r.findings.entry_high.is_some() {
+                                "long setup"
+                            } else {
+                                "no setup"
+                            },
                         ),
                         Err(err) => {
                             println!("[{}/{total}] {date} {symbol}: failed: {err:#}", i + 1)
@@ -312,17 +315,14 @@ async fn report(alpaca: &AlpacaClient, store: &Store) -> Result<()> {
     let spy = alpaca.daily_history(BENCHMARK, start).await?;
     let study = scorecard::study(&reports, &bars, &spy, Utc::now());
 
-    let buys = reports.iter().filter(|r| r.rating.is_buy()).count();
-    let by_rating = |rating: Rating| reports.iter().filter(|r| r.rating == rating).count();
+    let setups = reports
+        .iter()
+        .filter(|r| r.findings.entry_high.is_some())
+        .count();
     println!(
-        "\n{} reports: {} strong buy, {} buy, {} hold, {} sell, {} strong sell ({buys} \
-         the executor could act on)",
+        "\n{} reports, {setups} with a long setup (an entry range the executor could buy \
+         within)",
         reports.len(),
-        by_rating(Rating::StrongBuy),
-        by_rating(Rating::Buy),
-        by_rating(Rating::Hold),
-        by_rating(Rating::Sell),
-        by_rating(Rating::StrongSell),
     );
     print!("{}", scorecard::render_factors(&study));
     Ok(())
