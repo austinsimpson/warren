@@ -20,7 +20,7 @@ pub mod tools;
 use std::{
     fmt,
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     },
 };
@@ -31,10 +31,10 @@ use rig_agent::{
     AgentBuilder,
     agent::{
         AgentHook, CompletionCallAction, CompletionCallEvent, DispatchAction, DispatchEvent,
-        HookContext, OutcomeAction, OutcomeEvent,
+        HookContext, ModelTurnAction, ModelTurnFinished, OutcomeAction, OutcomeEvent,
     },
 };
-use rig_core::{completion::Usage, providers::anthropic::Anthropic};
+use rig_core::{catalog::Catalog, completion::Usage, providers::anthropic::Anthropic};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -101,6 +101,48 @@ pub struct AgentCtx {
     pub stop: Arc<AtomicBool>,
     /// Shadow scorer, when enabled and configured.
     pub jev: Option<Arc<jev::JevScorer>>,
+    /// Token usage of the run this context belongs to; see
+    /// [`AgentCtx::recorded`].
+    pub meter: Meter,
+}
+
+/// Tokens one run has spent, added as each model turn and Jev call finishes
+/// so a run that fails partway still accounts for what it used.
+#[derive(Clone, Default)]
+pub struct Meter(Arc<Mutex<RunUsage>>);
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct RunUsage {
+    pub model: Usage,
+    pub jev_input_tokens: u64,
+    pub jev_output_tokens: u64,
+}
+
+impl Meter {
+    fn add_turn(&self, usage: Usage) {
+        self.0.lock().unwrap().model += usage;
+    }
+
+    pub fn add_jev(&self, input_tokens: u64, output_tokens: u64) {
+        let mut usage = self.0.lock().unwrap();
+        usage.jev_input_tokens += input_tokens;
+        usage.jev_output_tokens += output_tokens;
+    }
+
+    fn total(&self) -> RunUsage {
+        *self.0.lock().unwrap()
+    }
+}
+
+/// The list-price cost of `usage` on `model` in USD: the provider's figure
+/// if it reported one, else priced from rig's model catalog. `None` for a
+/// model the catalog doesn't price.
+pub fn model_cost(model: &str, usage: &Usage) -> Option<f64> {
+    if let Some(cost) = &usage.cost {
+        return Some(cost.total);
+    }
+    let spec = Catalog::builtin().resolve(&format!("anthropic/{model}"))?;
+    Some(spec.pricing?.cost(usage)?.total)
 }
 
 impl AgentCtx {
@@ -137,22 +179,41 @@ impl AgentCtx {
             }))
     }
 
-    /// Run `work`, tracing its start and end and logging it to the store.
-    /// `work` returns its result, token usage, and a one-line summary.
+    /// The model settings `agent` runs with.
+    fn agent_model(&self, agent: AgentKind) -> &AgentModel {
+        match agent {
+            AgentKind::Exploration => &self.config.exploration.agent,
+            AgentKind::Research => &self.config.research.agent,
+            AgentKind::Executor => &self.config.executor.agent,
+        }
+    }
+
+    /// Run `work`, tracing its start and end and logging it to the store
+    /// with its token usage and cost. `work` gets a context with a fresh
+    /// [`Meter`], so agents built from it (and Jev calls made with it) are
+    /// counted against this run, and returns its result and a one-line
+    /// summary.
     async fn recorded<T>(
         &self,
         agent: AgentKind,
         subject: Option<&str>,
-        work: impl Future<Output = Result<(T, Usage, String)>>,
+        work: impl AsyncFnOnce(&AgentCtx) -> Result<(T, String)>,
     ) -> Result<T> {
         let started_at = Utc::now();
         self.emit(Some(agent), subject, EventKind::RunStarted);
-        let result = work.await;
-
-        let (ok, summary, usage) = match &result {
-            Ok((_, usage, summary)) => (true, summary.clone(), *usage),
-            Err(err) => (false, format!("{err:#}"), Usage::default()),
+        let run_ctx = AgentCtx {
+            meter: Meter::default(),
+            ..self.clone()
         };
+        let meter = run_ctx.meter.clone();
+        let result = work(&run_ctx).await;
+
+        let (ok, summary) = match &result {
+            Ok((_, summary)) => (true, summary.clone()),
+            Err(err) => (false, format!("{err:#}")),
+        };
+        let usage = meter.total();
+        let model = &self.agent_model(agent).model;
         self.emit(
             Some(agent),
             subject,
@@ -168,13 +229,22 @@ impl AgentCtx {
             finished_at: Utc::now(),
             ok,
             summary,
-            input_tokens: usage.input_tokens.unwrap_or_default(),
-            output_tokens: usage.output_tokens.unwrap_or_default(),
+            input_tokens: usage.model.input_tokens.unwrap_or_default(),
+            output_tokens: usage.model.output_tokens.unwrap_or_default(),
+            cached_input_tokens: usage.model.cached_input_tokens.unwrap_or_default(),
+            cache_write_tokens: usage.model.cache_creation_input_tokens.unwrap_or_default(),
+            model: Some(model.clone()),
+            cost_usd: model_cost(model, &usage.model).map(|cost| {
+                cost + usage.jev_input_tokens as f64 * self.config.jev.input_price_per_million
+                    / 1_000_000.0
+            }),
+            jev_input_tokens: usage.jev_input_tokens,
+            jev_output_tokens: usage.jev_output_tokens,
         };
         if let Err(err) = self.store.append_run(&record) {
             self.status(format!("Failed to log run: {err:#}"));
         }
-        result.map(|(value, _, _)| value)
+        result.map(|(value, _)| value)
     }
 }
 
@@ -207,6 +277,15 @@ impl AgentHook for TraceHook {
         } else {
             CompletionCallAction::Continue
         }
+    }
+
+    async fn on_model_turn_finished(
+        &self,
+        _: &HookContext,
+        event: ModelTurnFinished<'_>,
+    ) -> ModelTurnAction {
+        self.ctx.meter.add_turn(event.usage);
+        ModelTurnAction::Continue
     }
 
     async fn on_dispatch(&self, _: &HookContext, event: DispatchEvent<'_>) -> DispatchAction {
@@ -271,6 +350,7 @@ impl AgentCtx {
                 Some(Ok(scorer)) => Some(Arc::new(scorer)),
                 _ => None,
             },
+            meter: Meter::default(),
         };
         if ctx.config.jev.enabled && ctx.jev.is_none() {
             ctx.status("Jev shadow scoring disabled: set JEV_API_KEY");

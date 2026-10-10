@@ -6,6 +6,8 @@ mod config;
 mod market;
 mod portfolio;
 mod runtime;
+mod scorecard;
+mod scorecard_ui;
 mod store;
 mod theme;
 
@@ -45,6 +47,8 @@ struct Warren {
     portfolio: Portfolio,
     agents: Option<AgentsState>,
     agents_error: Option<SharedString>,
+    bottom_tab: scorecard_ui::BottomTab,
+    scorecard: scorecard_ui::ScorecardState,
 }
 
 impl Warren {
@@ -71,6 +75,8 @@ impl Warren {
             portfolio: Portfolio::default(),
             agents,
             agents_error,
+            bottom_tab: Default::default(),
+            scorecard: Default::default(),
         };
         this.refresh_quotes(cx);
         this.load_chart(cx);
@@ -445,7 +451,7 @@ impl Render for Warren {
                     .child(center)
                     .child(self.render_positions_and_orders(cx)),
             )
-            .child(self.render_activity())
+            .child(self.render_bottom_panel(cx))
     }
 }
 
@@ -453,9 +459,14 @@ fn main() {
     dotenvy::dotenv().ok();
 
     let args: Vec<String> = std::env::args().skip(1).collect();
-    if args.first().map(String::as_str) == Some("backtest") {
-        if let Err(err) = backtest::run_cli(&args[1..]) {
-            eprintln!("backtest failed: {err:#}");
+    let command = match args.first().map(String::as_str) {
+        Some("backtest") => Some(backtest::run_cli(&args[1..])),
+        Some("scorecard") => Some(scorecard::run_cli()),
+        _ => None,
+    };
+    if let Some(result) = command {
+        if let Err(err) = result {
+            eprintln!("{} failed: {err:#}", args[0]);
             std::process::exit(1);
         }
         return;

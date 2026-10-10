@@ -1,0 +1,58 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <!-- Warren: a price line drawn as a W, ending higher than it began. -->
+  <defs>
+    <linearGradient id="plate" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#151a22"/>
+      <stop offset="1" stop-color="#0b0d11"/>
+    </linearGradient>
+    <linearGradient id="area" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#4fd8e0" stop-opacity="0.32"/>
+      <stop offset="1" stop-color="#4fd8e0" stop-opacity="0"/>
+    </linearGradient>
+    <linearGradient id="line" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#34d399"/>
+      <stop offset="1" stop-color="#4fd8e0"/>
+    </linearGradient>
+    <!-- Fades the area's sides so it has no hard vertical edges. -->
+    <linearGradient id="sides" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#fff" stop-opacity="0"/>
+      <stop offset="0.3" stop-color="#fff" stop-opacity="1"/>
+      <stop offset="0.75" stop-color="#fff" stop-opacity="1"/>
+      <stop offset="1" stop-color="#fff" stop-opacity="0"/>
+    </linearGradient>
+    <mask id="fade" maskUnits="userSpaceOnUse" x="230" y="300" width="560" height="534">
+      <rect x="230" y="300" width="560" height="534" fill="url(#sides)"/>
+    </mask>
+    <radialGradient id="glow">
+      <stop offset="0" stop-color="#4fd8e0" stop-opacity="0.55"/>
+      <stop offset="1" stop-color="#4fd8e0" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+
+  <!-- macOS-style plate, inset so the icon matches system icon sizing. -->
+  <rect x="100" y="100" width="824" height="824" rx="185" fill="url(#plate)"/>
+  <rect x="100.5" y="100.5" width="823" height="823" rx="184.5" fill="none"
+        stroke="#ffffff" stroke-opacity="0.07" stroke-width="2"/>
+
+  <!-- Grid and dashed baseline, as on the price chart. -->
+  <g stroke="#1c2129" stroke-width="4">
+    <line x1="190" y1="380" x2="834" y2="380"/>
+    <line x1="190" y1="560" x2="834" y2="560"/>
+    <line x1="190" y1="740" x2="834" y2="740"/>
+  </g>
+  <line x1="190" y1="430" x2="834" y2="430" stroke="#5f6877" stroke-opacity="0.6"
+        stroke-width="5" stroke-dasharray="14 14"/>
+
+  <!-- Area under the line. -->
+  <path d="M230 430 L362 740 L512 520 L662 740 L790 300 L790 834 L230 834 Z"
+        fill="url(#area)" mask="url(#fade)"/>
+  <!-- The W. -->
+  <path d="M230 430 L362 740 L512 520 L662 740 L790 300" fill="none"
+        stroke="url(#line)" stroke-width="58" stroke-linecap="round"
+        stroke-linejoin="round"/>
+
+  <!-- Last price. -->
+  <circle cx="790" cy="300" r="92" fill="url(#glow)"/>
+  <circle cx="790" cy="300" r="40" fill="#4fd8e0"/>
+  <circle cx="790" cy="300" r="40" fill="none" stroke="#0b0d11" stroke-width="10"/>
+</svg>

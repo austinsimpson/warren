@@ -25,6 +25,8 @@ pub struct Config {
 pub struct JevConfig {
     pub enabled: bool,
     pub model: String,
+    /// USD per million input tokens; TypeSafe bills input tokens only.
+    pub input_price_per_million: f64,
 }
 
 impl Default for JevConfig {
@@ -32,6 +34,7 @@ impl Default for JevConfig {
         Self {
             enabled: true,
             model: "jev-latest".into(),
+            input_price_per_million: 0.042,
         }
     }
 }

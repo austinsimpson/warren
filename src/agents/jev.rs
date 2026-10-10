@@ -39,6 +39,8 @@ pub struct ShadowScores {
     /// Headlines Jev saw.
     pub articles: usize,
     pub input_tokens: u64,
+    #[serde(default)]
+    pub output_tokens: u64,
 }
 
 /// The rubric, mirroring the research agent's 1–5 bullishness scale.
@@ -118,6 +120,7 @@ impl JevScorer {
             news_sentiment: ShadowScore::from(&answers[self.news_sentiment]),
             articles: articles.len(),
             input_tokens: answers.usage().input_tokens,
+            output_tokens: answers.usage().output_tokens,
         })
     }
 }

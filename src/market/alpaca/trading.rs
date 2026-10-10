@@ -53,6 +53,30 @@ impl AlpacaClient {
         send_json(self.trading_request(Method::GET, &path)).await
     }
 
+    /// Daily account equity since `start`, oldest first. Days before the
+    /// account was funded are left out.
+    pub async fn equity_history(&self, start: DateTime<Utc>) -> Result<Vec<(DateTime<Utc>, f64)>> {
+        #[derive(Deserialize)]
+        struct History {
+            timestamp: Vec<i64>,
+            equity: Vec<Option<f64>>,
+        }
+        let start = start.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let request = self
+            .trading_request(Method::GET, "/v2/account/portfolio/history")
+            .query(&[("timeframe", "1D"), ("start", start.as_str())]);
+        let history: History = send_json(request).await?;
+        Ok(history
+            .timestamp
+            .into_iter()
+            .zip(history.equity)
+            .filter_map(|(at, equity)| {
+                let equity = equity.filter(|e| *e > 0.0)?;
+                Some((DateTime::from_timestamp(at, 0)?, equity))
+            })
+            .collect())
+    }
+
     pub async fn cancel_order(&self, order_id: &str) -> Result<()> {
         let path = format!("/v2/orders/{order_id}");
         send(self.trading_request(Method::DELETE, &path)).await?;

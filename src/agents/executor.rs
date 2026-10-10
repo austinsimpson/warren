@@ -199,7 +199,7 @@ Lessons from your past decisions:
 /// Run one executor cycle and return its summary.
 pub async fn run(ctx: &AgentCtx) -> Result<String> {
     let config = &ctx.config.executor.agent;
-    ctx.recorded(AgentKind::Executor, None, async {
+    ctx.recorded(AgentKind::Executor, None, async |ctx| {
         let agent = ctx
             .builder(AgentKind::Executor, None, config, preamble(ctx)?)?
             .tool(ReviewTradeHistory(ctx.clone()))
@@ -222,7 +222,7 @@ pub async fn run(ctx: &AgentCtx) -> Result<String> {
             .await
             .map_err(|err| anyhow!("executor run failed: {err}"))?;
         let summary = response.output();
-        Ok((summary.clone(), response.usage, summary))
+        Ok((summary.clone(), summary))
     })
     .await
 }

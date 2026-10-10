@@ -33,12 +33,18 @@ pub struct AgentsState {
     /// Current-version research history per symbol, oldest first.
     history: HashMap<String, Vec<(chrono::DateTime<chrono::Utc>, f64, Rating)>>,
     runs_today: usize,
+    /// Token and dollar totals from the run log.
+    pub usage: crate::scorecard::Usage,
     /// Agents mid-run, with their subject.
     running: Vec<(AgentKind, Option<String>)>,
     status: SharedString,
 }
 
 impl AgentsState {
+    pub fn store(&self) -> Arc<Store> {
+        self.ctx.store.clone()
+    }
+
     pub fn paused(&self) -> bool {
         self.ctx.stop.load(Ordering::Relaxed)
     }
@@ -60,8 +66,9 @@ impl AgentsState {
         if let Ok(candidates) = self.ctx.store.candidates() {
             self.candidates = candidates;
         }
-        if let Ok(runs) = self.ctx.store.runs_today() {
-            self.runs_today = runs;
+        if let Ok(runs) = self.ctx.store.runs() {
+            self.usage = crate::scorecard::usage(&runs, &self.ctx.config, chrono::Utc::now());
+            self.runs_today = self.usage.today.runs;
         }
     }
 }
@@ -96,6 +103,7 @@ pub fn start(alpaca: Arc<AlpacaClient>, cx: &mut Context<Warren>) -> anyhow::Res
         candidates: None,
         history: HashMap::new(),
         runs_today: 0,
+        usage: Default::default(),
         running: Vec::new(),
         status: "Starting…".into(),
     };
@@ -215,39 +223,39 @@ impl Warren {
                 ghost_button("run-cycle", "Run cycle", false)
                     .on_click(cx.listener(|this, _, _, cx| this.run_cycle_now(cx))),
             )
-            .child(label(format!("runs {}/{budget}", agents.runs_today)))
+            .child(label(format!(
+                "runs {}/{budget} · ${:.2} today",
+                agents.runs_today, agents.usage.today.cost_usd
+            )))
+    }
+
+    /// What the agents are doing now, or the scheduler's last status.
+    pub fn render_activity_status(&self) -> Option<Div> {
+        self.agents.as_ref().map(|agents| {
+            let running: Vec<String> = agents
+                .running
+                .iter()
+                .map(|(agent, subject)| match subject {
+                    Some(subject) => format!("{agent} {subject}"),
+                    None => agent.to_string(),
+                })
+                .collect();
+            div()
+                .flex_1()
+                .min_w_0()
+                .truncate()
+                .text_size(px(TEXT_XS))
+                .text_color(rgb(if running.is_empty() { MUTED } else { ACCENT }))
+                .child(if running.is_empty() {
+                    agents.status.to_string()
+                } else {
+                    format!("running: {}", running.join(", "))
+                })
+        })
     }
 
     /// Live feed of agent activity, newest first.
-    pub fn render_activity(&self) -> Div {
-        let header = div()
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap_3()
-            .child(label("Activity"))
-            .children(self.agents.as_ref().map(|agents| {
-                let running: Vec<String> = agents
-                    .running
-                    .iter()
-                    .map(|(agent, subject)| match subject {
-                        Some(subject) => format!("{agent} {subject}"),
-                        None => agent.to_string(),
-                    })
-                    .collect();
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .truncate()
-                    .text_size(px(TEXT_XS))
-                    .text_color(rgb(if running.is_empty() { MUTED } else { ACCENT }))
-                    .child(if running.is_empty() {
-                        agents.status.to_string()
-                    } else {
-                        format!("running: {}", running.join(", "))
-                    })
-            }));
-
+    pub fn render_activity(&self) -> impl IntoElement {
         let lines: Vec<Div> = self
             .agents
             .iter()
@@ -256,27 +264,14 @@ impl Warren {
             .collect();
 
         div()
+            .id("activity")
             .flex()
             .flex_col()
-            .h(px(150.))
-            .flex_none()
-            .px_3()
-            .py_2()
-            .gap_1()
-            .border_t_1()
-            .border_color(rgb(BORDER))
-            .child(header)
-            .child(
-                div()
-                    .id("activity")
-                    .flex()
-                    .flex_col()
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scroll()
-                    .text_size(px(TEXT_SM))
-                    .children(lines),
-            )
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .text_size(px(TEXT_SM))
+            .children(lines)
     }
 
     /// Rating, conviction, levels, and thesis for the selected symbol.

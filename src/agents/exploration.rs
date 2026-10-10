@@ -72,7 +72,7 @@ Selection rules:
 /// Find candidates, store them, and return them.
 pub async fn run(ctx: &AgentCtx) -> Result<CandidateList> {
     let config = &ctx.config.exploration;
-    ctx.recorded(AgentKind::Exploration, None, async {
+    ctx.recorded(AgentKind::Exploration, None, async |ctx| {
         let agent = ctx
             .builder(AgentKind::Exploration, None, &config.agent, preamble(ctx))?
             .tool(ScreenMarket(ctx.clone()))
@@ -117,7 +117,7 @@ pub async fn run(ctx: &AgentCtx) -> Result<CandidateList> {
                 .collect::<Vec<_>>()
                 .join(", ")
         );
-        Ok((list, response.usage, summary))
+        Ok((list, summary))
     })
     .await
 }

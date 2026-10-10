@@ -72,8 +72,26 @@ pub struct RunRecord {
     pub finished_at: DateTime<Utc>,
     pub ok: bool,
     pub summary: String,
+    /// Every input token, cached or not.
     pub input_tokens: u64,
     pub output_tokens: u64,
+    /// The part of `input_tokens` read from the prompt cache.
+    #[serde(default)]
+    pub cached_input_tokens: u64,
+    /// The part of `input_tokens` written to the prompt cache.
+    #[serde(default)]
+    pub cache_write_tokens: u64,
+    /// Absent on runs logged before models were recorded.
+    #[serde(default)]
+    pub model: Option<String>,
+    /// List-price cost in USD of the model calls (see `agents::model_cost`)
+    /// and Jev calls.
+    #[serde(default)]
+    pub cost_usd: Option<f64>,
+    #[serde(default)]
+    pub jev_input_tokens: u64,
+    #[serde(default)]
+    pub jev_output_tokens: u64,
 }
 
 /// The most lessons kept; older ones are dropped as new ones arrive.
@@ -184,6 +202,11 @@ impl Store {
 
     pub fn append_run(&self, run: &RunRecord) -> Result<()> {
         self.append_jsonl("runs.jsonl", run)
+    }
+
+    /// Every run, oldest first.
+    pub fn runs(&self) -> Result<Vec<RunRecord>> {
+        self.read_jsonl("runs.jsonl")
     }
 
     /// The most recent `limit` runs, newest first.
@@ -305,6 +328,12 @@ mod tests {
             summary: "ok".into(),
             input_tokens: 1,
             output_tokens: 2,
+            cached_input_tokens: 0,
+            cache_write_tokens: 0,
+            model: None,
+            cost_usd: None,
+            jev_input_tokens: 0,
+            jev_output_tokens: 0,
         };
         store.append_run(&run(AgentKind::Research)).unwrap();
         store.append_run(&run(AgentKind::Executor)).unwrap();

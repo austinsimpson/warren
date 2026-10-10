@@ -145,7 +145,7 @@ Rules:
 pub async fn run(ctx: &AgentCtx, symbol: &str) -> Result<ResearchReport> {
     let symbol = symbol.trim().to_uppercase();
     let config = &ctx.config.research.agent;
-    ctx.recorded(AgentKind::Research, Some(&symbol), async {
+    ctx.recorded(AgentKind::Research, Some(&symbol), async |ctx| {
         let quant = compute_quant_factors(ctx, &symbol).await?;
         let agent = ctx
             .builder(AgentKind::Research, Some(&symbol), config, PREAMBLE.into())?
@@ -210,7 +210,7 @@ pub async fn run(ctx: &AgentCtx, symbol: &str) -> Result<ResearchReport> {
             report.conviction,
             factors.join(" ")
         );
-        Ok((report, response.usage, summary))
+        Ok((report, summary))
     })
     .await
 }
@@ -239,7 +239,10 @@ async fn shadow_score(ctx: &AgentCtx, symbol: &str) -> Option<ShadowScores> {
     }
     .await;
     match result {
-        Ok(scores) => Some(scores),
+        Ok(scores) => {
+            ctx.meter.add_jev(scores.input_tokens, scores.output_tokens);
+            Some(scores)
+        }
         Err(err) => {
             ctx.status(format!("Jev shadow scoring {symbol} failed: {err:#}"));
             None
