@@ -12,6 +12,7 @@ use crate::strategy::Style;
 
 use super::{
     AgentCtx, AgentKind,
+    book::Book,
     jev::ShadowScores,
     scoring::{self, FactorScores, JudgedFactors, QuantFactors},
     technicals::{self, Technicals},
@@ -134,6 +135,10 @@ Process:
 3. get_price_history (daily, ~6 months) to judge structure: support and \
    resistance, recent breakouts or breakdowns, gaps.
 4. get_news (about 14 days) for catalysts, earnings, guidance, and sentiment.
+5. list_filings and read_filing for the company's own words: the latest \
+   earnings release (an 8-K flagged earnings), and the 10-Q or 10-K \
+   (Results of Operations, Liquidity, Outlook) when results matter to the \
+   thesis. Cite what you read.
 
 Report:
 - Thesis: the core argument in 2–4 sentences, for or against owning it now.
@@ -249,6 +254,8 @@ pub async fn run(ctx: &AgentCtx, symbol: &str) -> Result<ResearchReport> {
             None => ctx.config.research.web_searches_per_stock,
             Some(_) => 0,
         };
+        // A stock the agent owns gets re-underwritten against its filings.
+        let holding_note = holding_note(ctx, &symbol, price).await;
         let preamble = format!("{PREAMBLE}{}", style_section(ctx.strategy.style));
         let mut builder = ctx.builder(AgentKind::Research, Some(&symbol), config, preamble)?;
         if searches > 0 {
@@ -276,13 +283,15 @@ pub async fn run(ctx: &AgentCtx, symbol: &str) -> Result<ResearchReport> {
             .tool(GetTechnicals(ctx.clone()))
             .tool(GetPriceHistory(ctx.clone()))
             .tool(GetNews(ctx.clone()))
+            .tool(ListFilings(ctx.clone()))
+            .tool(ReadFiling(ctx.clone()))
             .build();
 
         let research = agent
             .prompt_typed::<ResearchFindings>(format!(
                 "Research {symbol} now ({}) and return your report.\n\n\
                  Computed factors (fixed; do not re-score):\n{}{sector}{fundamentals_note}\
-                 {search_note}",
+                 {holding_note}{search_note}",
                 ctx.now().format("%Y-%m-%d %H:%M UTC"),
                 describe(&quant),
             ))
@@ -337,6 +346,50 @@ pub async fn run(ctx: &AgentCtx, symbol: &str) -> Result<ResearchReport> {
         Ok((report, summary))
     })
     .await
+}
+
+/// For a stock the agent holds: the position, the previous report's thesis,
+/// and a directive to check the latest results against it. Empty otherwise,
+/// and in replays, where the book is today's.
+async fn holding_note(ctx: &AgentCtx, symbol: &str, price: Option<f64>) -> String {
+    if ctx.as_of.is_some() {
+        return String::new();
+    }
+    let Ok(book) = Book::load(&ctx.alpaca, &ctx.strategy).await else {
+        return String::new();
+    };
+    let Some(held) = book.positions.iter().find(|h| h.symbol == symbol) else {
+        return String::new();
+    };
+    let gain = price.map_or(String::new(), |p| {
+        format!(", {:+.1}% at {p:.2}", (p / held.avg_cost - 1.0) * 100.0)
+    });
+    let previous = match ctx.store.report(symbol) {
+        Ok(Some(r)) => format!(
+            "\nThe previous report ({}) said: {} (entry {}, stop {}.)",
+            r.generated_at.format("%Y-%m-%d"),
+            r.findings.thesis,
+            r.findings
+                .entry_high
+                .map_or("none".into(), |e| format!("≤{e:.2}")),
+            r.findings
+                .stop_loss
+                .map_or("none".into(), |s| format!("{s:.2}")),
+        ),
+        _ => String::new(),
+    };
+    format!(
+        "\n\nThis agent holds {symbol}: {:.0} shares at an average cost of {:.2}{gain}, \
+         opened {}.{previous}\nBecause it is held, re-underwrite it from the company's \
+         own numbers: use list_filings and read_filing to read the latest earnings \
+         release and the latest 10-Q or 10-K (results, guidance, margins, cash, and any \
+         new risks), compare them with the thesis above, and say plainly in your thesis \
+         whether it still holds, has strengthened, or has broken. Set the stop where the \
+         thesis would be wrong.",
+        held.qty,
+        held.avg_cost,
+        held.opened_at.format("%Y-%m-%d"),
+    )
 }
 
 /// Trend, momentum, and relative strength from about 18 months of daily

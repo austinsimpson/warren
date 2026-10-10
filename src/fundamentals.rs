@@ -20,7 +20,7 @@ use anyhow::{Context as _, Result};
 use chrono::{Datelike as _, Duration, NaiveDate};
 use serde::{Deserialize, Serialize};
 
-use crate::market::edgar::EdgarClient;
+use crate::market::edgar::{EdgarClient, Filing};
 
 /// Revenue tags in order of preference: filers use different ones.
 pub const REVENUE_TAGS: [&str; 4] = [
@@ -290,7 +290,13 @@ pub struct FundamentalsDirectory {
     edgar: EdgarClient,
     dir: std::path::PathBuf,
     tickers: tokio::sync::Mutex<Option<(chrono::DateTime<chrono::Utc>, HashMap<String, u64>)>>,
+    /// Recently read filing texts by accession number, so paging through
+    /// a long filing doesn't refetch it.
+    texts: tokio::sync::Mutex<Vec<(String, std::sync::Arc<String>)>>,
 }
+
+/// Filing texts kept in memory.
+const CACHED_TEXTS: usize = 8;
 
 impl FundamentalsDirectory {
     pub fn open(edgar: EdgarClient, data_root: &std::path::Path) -> Result<Self> {
@@ -300,6 +306,7 @@ impl FundamentalsDirectory {
             edgar,
             dir,
             tickers: tokio::sync::Mutex::new(None),
+            texts: tokio::sync::Mutex::new(Vec::new()),
         })
     }
 
@@ -315,6 +322,42 @@ impl FundamentalsDirectory {
         Ok(tickers
             .as_ref()
             .and_then(|(_, map)| map.get(symbol).copied()))
+    }
+
+    /// The symbol's recent financial filings, newest first; `None` when the
+    /// SEC has no filer under the ticker.
+    pub async fn filings(&self, symbol: &str) -> Result<Option<Vec<Filing>>> {
+        let Some(cik) = self.cik(symbol).await? else {
+            return Ok(None);
+        };
+        Ok(Some(self.edgar.filings(cik).await?))
+    }
+
+    /// The readable text of one of the symbol's filings.
+    pub async fn filing_text(
+        &self,
+        symbol: &str,
+        filing: &Filing,
+    ) -> Result<std::sync::Arc<String>> {
+        if let Some((_, text)) = self
+            .texts
+            .lock()
+            .await
+            .iter()
+            .find(|(accession, _)| accession == &filing.accession)
+        {
+            return Ok(text.clone());
+        }
+        let cik = self
+            .cik(symbol)
+            .await?
+            .context("no SEC filer under this ticker")?;
+        let text = std::sync::Arc::new(self.edgar.filing_text(cik, filing).await?);
+        let mut texts = self.texts.lock().await;
+        texts.push((filing.accession.clone(), text.clone()));
+        let excess = texts.len().saturating_sub(CACHED_TEXTS);
+        texts.drain(..excess);
+        Ok(text)
     }
 
     /// The symbol's series, or `None` for companies without US-GAAP filings

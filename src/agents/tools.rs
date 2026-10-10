@@ -291,6 +291,150 @@ impl GetAsset {
 
 #[derive(Deserialize, JsonSchema)]
 #[schemars(crate = "rig_core::schemars")]
+pub struct ListFilingsArgs {
+    pub symbol: String,
+    /// Only these forms, e.g. ["10-Q", "10-K", "8-K"]; all financial forms if empty.
+    #[serde(default)]
+    pub forms: Vec<String>,
+}
+
+tool!(
+    ListFilings,
+    "list_filings",
+    ListFilingsArgs,
+    "The company's recent SEC filings, newest first: earnings releases (8-Ks with item \
+     2.02, flagged earnings: true), quarterly reports (10-Q), annual reports (10-K), other \
+     8-K events, and foreign issuers' 20-F and 6-K. Each has its accession number for \
+     read_filing."
+);
+
+impl ListFilings {
+    async fn run(&self, args: ListFilingsArgs) -> ToolResult {
+        let ctx = &self.0;
+        let symbol = args.symbol.trim().to_uppercase();
+        let directory = ctx.fundamentals.as_ref().ok_or_else(|| {
+            failed(anyhow::anyhow!(
+                "SEC data is off (set edgar.contact in config.toml)"
+            ))
+        })?;
+        let filings = directory
+            .filings(&symbol)
+            .await
+            .map_err(failed)?
+            .ok_or_else(|| ToolExecutionError::not_found(format!("no SEC filer under {symbol}")))?;
+        let as_of = ctx.now().date_naive();
+        let forms: Vec<String> = args.forms.iter().map(|f| f.trim().to_uppercase()).collect();
+        let rows: Vec<Value> = filings
+            .iter()
+            .filter(|f| f.filed <= as_of)
+            .filter(|f| forms.is_empty() || forms.contains(&f.form))
+            .take(MAX_FILINGS)
+            .map(|f| {
+                json!({
+                    "form": f.form,
+                    "filed": f.filed,
+                    "period": f.report_date,
+                    "earnings": f.is_earnings(),
+                    "items": f.items,
+                    "description": f.description,
+                    "accession": f.accession,
+                })
+            })
+            .collect();
+        Ok(json!({ "symbol": symbol, "filings": rows }))
+    }
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[schemars(crate = "rig_core::schemars")]
+pub struct ReadFilingArgs {
+    pub symbol: String,
+    /// From list_filings.
+    pub accession: String,
+    /// Jump to the first place this text appears, case-insensitive, e.g.
+    /// "Results of Operations", "Liquidity", "Outlook", "Guidance", "Risk Factors".
+    #[serde(default)]
+    pub find: Option<String>,
+    /// Characters to skip, to page through a long filing (see next_offset).
+    #[serde(default)]
+    pub offset: Option<usize>,
+}
+
+tool!(
+    ReadFiling,
+    "read_filing",
+    ReadFilingArgs,
+    "The text of one SEC filing, a page at a time. For an earnings 8-K this is the press \
+     release (results, guidance, management commentary). 10-Qs and 10-Ks are long: use \
+     `find` to jump to a section such as \"Results of Operations\", \"Liquidity and Capital \
+     Resources\", or \"Risk Factors\", and `offset` (from next_offset) to keep reading."
+);
+
+impl ReadFiling {
+    async fn run(&self, args: ReadFilingArgs) -> ToolResult {
+        let ctx = &self.0;
+        let symbol = args.symbol.trim().to_uppercase();
+        let directory = ctx.fundamentals.as_ref().ok_or_else(|| {
+            failed(anyhow::anyhow!(
+                "SEC data is off (set edgar.contact in config.toml)"
+            ))
+        })?;
+        let filings = directory
+            .filings(&symbol)
+            .await
+            .map_err(failed)?
+            .unwrap_or_default();
+        let filing = filings
+            .iter()
+            .find(|f| f.accession == args.accession.trim())
+            .ok_or_else(|| {
+                ToolExecutionError::not_found("no such filing; use an accession from list_filings")
+            })?;
+        // Point in time: nothing filed after the research moment.
+        if filing.filed > ctx.now().date_naive() {
+            return Err(ToolExecutionError::not_found(
+                "that filing was not yet public at this moment",
+            ));
+        }
+        let text = directory
+            .filing_text(&symbol, filing)
+            .await
+            .map_err(failed)?;
+        let found = args.find.as_ref().and_then(|needle| {
+            let needle = needle.to_lowercase();
+            text.to_lowercase()
+                .find(&needle)
+                .map(|at| at.saturating_sub(200))
+        });
+        let start = floor_char_boundary(&text, args.offset.or(found).unwrap_or(0).min(text.len()));
+        let end = floor_char_boundary(&text, (start + PAGE_CHARS).min(text.len()));
+        Ok(json!({
+            "form": filing.form,
+            "filed": filing.filed,
+            "total_chars": text.len(),
+            "offset": start,
+            "next_offset": (end < text.len()).then_some(end),
+            "found": args.find.as_ref().map(|_| found.is_some()),
+            "text": &text[start..end],
+        }))
+    }
+}
+
+/// Filings listed per call.
+const MAX_FILINGS: usize = 20;
+/// Characters of filing text per call, about 4k tokens.
+const PAGE_CHARS: usize = 15_000;
+
+/// The largest char boundary at or below `at`.
+fn floor_char_boundary(text: &str, mut at: usize) -> usize {
+    while at > 0 && !text.is_char_boundary(at) {
+        at -= 1;
+    }
+    at
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[schemars(crate = "rig_core::schemars")]
 pub struct ScanArgs {
     /// How many top-ranked names to return, 1 to 60.
     pub top: u32,
@@ -1096,5 +1240,57 @@ mod tests {
         ] {
             assert_eq!(schema["type"], "object", "{schema}");
         }
+    }
+}
+
+#[cfg(test)]
+mod live_tests {
+    use super::*;
+
+    /// Lists and reads real SEC filings; run with
+    /// `cargo test live_filings -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn live_filings() {
+        let (mut ctx, dir) = crate::agents::test_support::live_ctx();
+        let config = std::sync::Arc::new(crate::config::Config::load_or_create().unwrap());
+        let edgar = crate::market::edgar::EdgarClient::new(&config.edgar.contact).unwrap();
+        ctx.fundamentals = Some(std::sync::Arc::new(
+            crate::fundamentals::FundamentalsDirectory::open(edgar, &dir).unwrap(),
+        ));
+        crate::runtime::RUNTIME.block_on(async {
+            let list = ListFilings(ctx.clone())
+                .run(ListFilingsArgs {
+                    symbol: "NVDA".into(),
+                    forms: vec![],
+                })
+                .await
+                .unwrap();
+            let filings = list["filings"].as_array().unwrap();
+            for f in filings.iter().take(6) {
+                println!(
+                    "{} {} earnings={} {}",
+                    f["form"], f["filed"], f["earnings"], f["accession"]
+                );
+            }
+            let earnings = filings.iter().find(|f| f["earnings"] == true).unwrap();
+            let read = ReadFiling(ctx.clone())
+                .run(ReadFilingArgs {
+                    symbol: "NVDA".into(),
+                    accession: earnings["accession"].as_str().unwrap().into(),
+                    find: Some("outlook".into()),
+                    offset: None,
+                })
+                .await
+                .unwrap();
+            println!(
+                "read {} chars of {}; found={}\n{}",
+                read["text"].as_str().unwrap().len(),
+                read["total_chars"],
+                read["found"],
+                &read["text"].as_str().unwrap()[..600]
+            );
+        });
+        std::fs::remove_dir_all(dir).ok();
     }
 }
