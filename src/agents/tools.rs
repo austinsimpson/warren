@@ -10,7 +10,7 @@ use rig_core::schemars::{self, JsonSchema};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use super::{AgentCtx, book::Book, executor, research::TrendHealth, scan, technicals};
+use super::{AgentCtx, book::Book, executor, research::TrendHealth, scan, sweep, technicals};
 use crate::market::alpaca::{NewOrder, OrderSide, Timeframe};
 use crate::store::JournalEntry;
 
@@ -586,6 +586,12 @@ impl GetPortfolio {
             },
             "positions": positions,
             "open_orders": open_orders,
+            "cash_sweep": book.sweep.as_ref().map(|s| json!({
+                "fund": s.symbol,
+                "value": round2(s.market_value()),
+                "note": "Idle cash parked in T-bills; already included in cash_available. \
+                         Warren sells it automatically to fund buys.",
+            })),
             "note": "This is your own book within a paper account shared with other agents; \
                      you can only sell shares you bought.",
         }))
@@ -761,6 +767,11 @@ impl PlaceOrder {
         }
 
         let alpaca = &ctx.alpaca;
+        if ctx.strategy.cash_sweep.as_deref() == Some(symbol.as_str()) {
+            return Err(ToolExecutionError::refused(format!(
+                "{symbol} is this agent's cash sweep, which Warren manages; it counts as cash"
+            )));
+        }
         if side == OrderSide::Buy {
             check_universe(ctx, &symbol)
                 .await
@@ -817,13 +828,18 @@ impl PlaceOrder {
             .map_err(ToolExecutionError::refused)?;
         // Agents' budgets can add up to more than the account holds.
         let notional = proposal.price * args.qty as f64;
-        if side == OrderSide::Buy && notional > account.cash {
+        // Selling this agent's sweep shares frees cash for the buy.
+        if side == OrderSide::Buy && notional > account.cash + book.sweep_value() {
             return Err(ToolExecutionError::refused(format!(
                 "the shared paper account has only ${:.2} cash left across all agents",
                 account.cash
             )));
         }
 
+        // Free up swept cash first, if the buy needs it.
+        if side == OrderSide::Buy {
+            sweep::fund(ctx, &book, notional).await.map_err(failed)?;
+        }
         let new_order = match args.limit_price {
             Some(limit) => NewOrder::limit(&symbol, side, args.qty, limit),
             None => NewOrder::market(&symbol, side, args.qty),

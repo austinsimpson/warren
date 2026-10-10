@@ -16,6 +16,7 @@ pub mod jev;
 pub mod research;
 pub mod scan;
 pub mod scoring;
+pub mod sweep;
 pub mod technicals;
 pub mod tools;
 

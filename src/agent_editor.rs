@@ -499,6 +499,19 @@ impl Render for AgentEditor {
             .child(row("Horizon", segmented(horizon_choices)))
             .child(row("Sectors", segmented(sector_choices)))
             .child(row(
+                "Idle cash",
+                toggle("sweep", d.cash_sweep.is_some(), "park in T-bills (SGOV)").on_click(
+                    cx.listener(|this, _, _, cx| {
+                        this.update(cx, |s| {
+                            s.cash_sweep = match s.cash_sweep {
+                                Some(_) => None,
+                                None => Some(crate::agents::sweep::DEFAULT_FUND.into()),
+                            }
+                        })
+                    }),
+                ),
+            ))
+            .child(row(
                 "Foreign companies",
                 toggle("foreign", d.universe.allow_foreign, "allow (incl. ADRs)").on_click(
                     cx.listener(|this, _, _, cx| {

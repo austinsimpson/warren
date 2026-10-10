@@ -50,6 +50,10 @@ pub struct Strategy {
     /// limits still apply.
     #[serde(default)]
     pub instructions: String,
+    /// A Treasury-bill fund idle cash is parked in, e.g. `SGOV`; see
+    /// `agents::sweep`. `None` leaves cash idle.
+    #[serde(default)]
+    pub cash_sweep: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -358,6 +362,7 @@ impl Strategy {
             schedule: StrategySchedule::default(),
             models: Models::default(),
             instructions: String::new(),
+            cash_sweep: None,
         }
     }
 
@@ -455,6 +460,12 @@ impl Strategy {
             min_price = self.universe.min_price,
             min_dv = self.universe.min_avg_dollar_volume,
         );
+        if let Some(fund) = &self.cash_sweep {
+            text += &format!(
+                "\n- Idle cash is parked automatically in {fund} (Treasury bills) and counts \
+                 as cash: holding cash still earns T-bill yield, so never feel pushed to buy."
+            );
+        }
         let instructions = self.instructions.trim();
         if !instructions.is_empty() {
             text += &format!(

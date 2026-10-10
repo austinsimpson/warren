@@ -21,6 +21,9 @@ pub struct Book {
     pub reserved: f64,
     pub realized_pl: f64,
     pub positions: Vec<Holding>,
+    /// Shares of the strategy's cash sweep (a T-bill fund), held apart from
+    /// positions: they count as cash for every limit.
+    pub sweep: Option<Holding>,
     /// This strategy's orders that can still fill.
     #[serde(skip)]
     pub open_orders: Vec<Order>,
@@ -115,6 +118,11 @@ impl Book {
             })
             .collect();
         book.positions.sort_by(|a, b| a.symbol.cmp(&b.symbol));
+        if let Some(sweep) = &strategy.cash_sweep
+            && let Some(i) = book.positions.iter().position(|h| &h.symbol == sweep)
+        {
+            book.sweep = Some(book.positions.remove(i));
+        }
         book
     }
 
@@ -146,6 +154,7 @@ impl Book {
 
     pub fn equity(&self) -> f64 {
         self.cash
+            + self.sweep_value()
             + self
                 .positions
                 .iter()
@@ -153,9 +162,18 @@ impl Book {
                 .sum::<f64>()
     }
 
-    /// Cash not committed to open buy orders.
+    /// Cash not committed to open buy orders, counting the sweep as cash.
     pub fn available_cash(&self) -> f64 {
+        self.idle_cash() + self.sweep_value()
+    }
+
+    /// Cash not committed to open buy orders, without the sweep.
+    pub fn idle_cash(&self) -> f64 {
         self.cash - self.reserved
+    }
+
+    pub fn sweep_value(&self) -> f64 {
+        self.sweep.as_ref().map_or(0.0, Holding::market_value)
     }
 
     pub fn holding(&self, symbol: &str) -> Option<&Holding> {
@@ -249,6 +267,37 @@ mod tests {
         assert_eq!(book.reserved, 100.0);
         assert_eq!(book.equity(), book.cash + 15.0 * 130.0);
         assert_eq!(book.open_orders.len(), 1);
+    }
+
+    #[test]
+    fn sweep_shares_count_as_cash_not_positions() {
+        let mut s = Strategy::new("Boomer", 10_000.0);
+        s.cash_sweep = Some("SGOV".into());
+        let p = s.order_prefix();
+        let orders = vec![
+            order(
+                &format!("{p}1"),
+                "SGOV",
+                OrderSide::Buy,
+                50.0,
+                Some(100.0),
+                "filled",
+            ),
+            order(
+                &format!("{p}2"),
+                "AAA",
+                OrderSide::Buy,
+                10.0,
+                Some(50.0),
+                "filled",
+            ),
+        ];
+        let prices = HashMap::from([("SGOV".to_string(), 100.5), ("AAA".to_string(), 50.0)]);
+        let book = Book::from_orders(&s, &orders, &prices);
+        assert_eq!(book.positions.len(), 1);
+        assert_eq!(book.idle_cash(), 10_000.0 - 5_000.0 - 500.0);
+        assert_eq!(book.available_cash(), 4_500.0 + 5_025.0);
+        assert_eq!(book.equity(), 4_500.0 + 5_025.0 + 500.0);
     }
 
     #[test]

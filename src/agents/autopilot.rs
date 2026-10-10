@@ -13,7 +13,7 @@ use anyhow::Result;
 use chrono::{Local, Utc};
 use tokio::sync::Notify;
 
-use super::{AgentCtx, AgentKind, book::Book, executor, exploration, research};
+use super::{AgentCtx, AgentKind, book::Book, executor, exploration, research, sweep};
 use crate::config::Config;
 use crate::strategy::Strategy;
 
@@ -154,6 +154,11 @@ impl Autopilot {
 
         if self.may_run()? {
             let _ = executor::run(ctx).await;
+        }
+        if clock.is_open
+            && let Err(err) = sweep::park_idle_cash(ctx).await
+        {
+            ctx.status(format!("Cash sweep failed: {err:#}"));
         }
         Ok(Duration::from_secs(schedule.cycle_interval_minutes * 60))
     }
