@@ -14,7 +14,10 @@ use chrono::{DateTime, Local, Utc};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use crate::agents::{
-    AgentKind, exploration::CandidateList, jev::ShadowScores, research::ResearchReport,
+    AgentKind,
+    exploration::CandidateList,
+    jev::ShadowScores,
+    research::{ResearchReport, SCORING_VERSION},
     scoring::FactorScores,
 };
 use crate::market::alpaca::{OrderSide, OrderType};
@@ -123,6 +126,28 @@ impl Store {
         }
         reports.sort_by(|a: &ResearchReport, b| b.generated_at.cmp(&a.generated_at));
         Ok(reports)
+    }
+
+    /// Current-version history for every symbol, oldest first.
+    pub fn all_report_history(&self) -> Result<Vec<ResearchReport>> {
+        Ok(self
+            .history_lines()?
+            .filter(|r| r.scoring_version == SCORING_VERSION)
+            .collect())
+    }
+
+    fn history_lines(&self) -> Result<impl Iterator<Item = ResearchReport>> {
+        let path = self.dir.join("research_history.jsonl");
+        let text = if path.exists() {
+            fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?
+        } else {
+            String::new()
+        };
+        let reports: Vec<ResearchReport> = text
+            .lines()
+            .filter_map(|line| serde_json::from_str(line).ok())
+            .collect();
+        Ok(reports.into_iter())
     }
 
     pub fn save_candidates(&self, candidates: &CandidateList) -> Result<()> {
@@ -291,6 +316,27 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn history_keeps_current_version_and_skips_bad_lines() {
+        let (store, dir) = temp_store();
+        let live = crate::agents::test_support::sample_report("NU", SCORING_VERSION);
+        let old = crate::agents::test_support::sample_report("NU", SCORING_VERSION - 1);
+        store.append_jsonl("research_history.jsonl", &old).unwrap();
+        store.append_jsonl("research_history.jsonl", &live).unwrap();
+        fs::OpenOptions::new()
+            .append(true)
+            .open(dir.join("research_history.jsonl"))
+            .unwrap()
+            .write_all(b"{not json}\n")
+            .unwrap();
+        store.save_report(&live).unwrap();
+
+        let history = store.all_report_history().unwrap();
+        assert_eq!(history.len(), 2, "old version and bad line skipped");
+        assert!(history.iter().all(|r| r.scoring_version == SCORING_VERSION));
         fs::remove_dir_all(dir).unwrap();
     }
 }

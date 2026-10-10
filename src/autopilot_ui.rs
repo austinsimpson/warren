@@ -30,6 +30,8 @@ pub struct AgentsState {
     events: VecDeque<AgentEvent>,
     pub reports: HashMap<String, ResearchReport>,
     pub candidates: Option<CandidateList>,
+    /// Current-version research history per symbol, oldest first.
+    history: HashMap<String, Vec<(chrono::DateTime<chrono::Utc>, f64, Rating)>>,
     runs_today: usize,
     /// Agents mid-run, with their subject.
     running: Vec<(AgentKind, Option<String>)>,
@@ -44,6 +46,16 @@ impl AgentsState {
     fn reload(&mut self) {
         if let Ok(reports) = self.ctx.store.reports() {
             self.reports = reports.into_iter().map(|r| (r.symbol.clone(), r)).collect();
+        }
+        if let Ok(history) = self.ctx.store.all_report_history() {
+            self.history.clear();
+            for report in history {
+                self.history.entry(report.symbol).or_default().push((
+                    report.generated_at,
+                    report.conviction,
+                    report.rating,
+                ));
+            }
         }
         if let Ok(candidates) = self.ctx.store.candidates() {
             self.candidates = candidates;
@@ -82,6 +94,7 @@ pub fn start(alpaca: Arc<AlpacaClient>, cx: &mut Context<Warren>) -> anyhow::Res
         events: VecDeque::new(),
         reports: HashMap::new(),
         candidates: None,
+        history: HashMap::new(),
         runs_today: 0,
         running: Vec::new(),
         status: "Starting…".into(),
@@ -380,6 +393,7 @@ impl Warren {
                                 .children(shadow)
                         })),
                 )
+                .children(self.render_conviction_history())
                 .child(
                     div()
                         .w_full()
@@ -387,7 +401,68 @@ impl Warren {
                         .text_size(px(TEXT_SM))
                         .text_color(rgb(TEXT))
                         .line_clamp(2)
+                        .text_ellipsis()
                         .child(f.thesis.clone()),
+                ),
+        )
+    }
+
+    /// Conviction across every report on the selected symbol, with the change
+    /// since the first and the buy threshold for reference.
+    fn render_conviction_history(&self) -> Option<Div> {
+        let agents = self.agents.as_ref()?;
+        let history = agents.history.get(&self.selected)?;
+        let (first, last) = (history.first()?, history.last()?);
+        let change = last.1 - first.1;
+        let (change_text, change_color) = if history.len() < 2 {
+            ("first report".to_string(), MUTED)
+        } else if change.abs() < 0.005 {
+            (format!("{:.2} → {:.2}, unchanged", first.1, last.1), MUTED)
+        } else {
+            (
+                format!("{:.2} → {:.2} ({change:+.2})", first.1, last.1),
+                if change > 0.0 { GREEN } else { RED },
+            )
+        };
+        let since = first.0.with_timezone(&Local).format("%b %-d");
+        let points = history
+            .iter()
+            .map(|(at, conviction, rating)| crate::chart::ConvictionPoint {
+                at: *at,
+                conviction: *conviction,
+                color: rating_color(*rating),
+            })
+            .collect();
+        let threshold = agents.ctx.config.executor.min_conviction_to_buy;
+
+        Some(
+            div()
+                .flex()
+                .flex_col()
+                .gap_0p5()
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap_2()
+                        .text_size(px(TEXT_XS))
+                        .child(label("conviction history"))
+                        .child(div().text_color(rgb(change_color)).child(change_text))
+                        .child(div().flex_1())
+                        .child(label(format!(
+                            "{} report{} since {since}",
+                            history.len(),
+                            if history.len() == 1 { "" } else { "s" }
+                        ))),
+                )
+                .child(
+                    div()
+                        .h(px(44.))
+                        .w_full()
+                        .rounded_sm()
+                        .bg(tint(BORDER, 0.35))
+                        .child(crate::chart::conviction_history(points, threshold)),
                 ),
         )
     }

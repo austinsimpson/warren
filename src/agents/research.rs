@@ -76,6 +76,10 @@ pub struct ResearchFindings {
     pub factors: JudgedFactors,
 }
 
+/// Bump when scoring changes so reports scored differently are not compared
+/// as if they were the same scale.
+pub const SCORING_VERSION: u32 = 1;
+
 /// A stored report: the findings, the scores computed from them, and when and
 /// at what price they were made.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -84,6 +88,9 @@ pub struct ResearchReport {
     pub generated_at: DateTime<Utc>,
     pub model: String,
     pub price_at_research: Option<f64>,
+    /// The [`SCORING_VERSION`] that produced `rating` and `conviction`.
+    #[serde(default)]
+    pub scoring_version: u32,
     pub rating: Rating,
     /// Computed: 0 = maximally bearish, 0.5 = neutral, 1 = maximally bullish.
     pub conviction: f64,
@@ -176,6 +183,7 @@ pub async fn run(ctx: &AgentCtx, symbol: &str) -> Result<ResearchReport> {
             generated_at: Utc::now(),
             model: config.model.clone(),
             price_at_research: price,
+            scoring_version: SCORING_VERSION,
             rating: scored.rating,
             conviction: scored.conviction,
             risk_reward: scored.risk_reward,

@@ -164,6 +164,112 @@ pub fn price_chart(
 
 const GRID_LINES: usize = 4;
 
+/// One research report on the conviction timeline.
+pub struct ConvictionPoint {
+    pub at: DateTime<Utc>,
+    /// 0–1.
+    pub conviction: f64,
+    /// Rating color for the marker.
+    pub color: u32,
+}
+
+/// Conviction over time on a fixed 0–1 scale, with the executor's buy
+/// threshold dashed and neutral (0.5) faint. Points are spaced by time and
+/// colored by rating; the latest is enlarged. Fills its parent.
+pub fn conviction_history(points: Vec<ConvictionPoint>, threshold: f64) -> impl IntoElement {
+    canvas(
+        |_, _, _| {},
+        move |bounds, _, window, _| {
+            let inset = px(5.);
+            let left = bounds.left() + inset;
+            let width = bounds.size.width - inset * 2.;
+            let top = bounds.top() + inset;
+            let height = bounds.size.height - inset * 2.;
+            let (lo, hi) = conviction_scale(&points, threshold);
+            let y = |value: f64| top + height * (1.0 - ((value - lo) / (hi - lo)) as f32);
+
+            for (level, color, dashed) in [
+                (0.5, tint(BORDER, 0.9), false),
+                (threshold, tint(GREEN, 0.45), true),
+            ] {
+                if !(lo..=hi).contains(&level) {
+                    continue;
+                }
+                let mut line = PathBuilder::stroke(px(1.));
+                if dashed {
+                    line = line.dash_array(&[px(3.), px(3.)]);
+                }
+                line.move_to(point(left, y(level)));
+                line.line_to(point(left + width, y(level)));
+                if let Ok(path) = line.build() {
+                    window.paint_path(path, color);
+                }
+            }
+
+            let Some(first) = points.first() else {
+                return;
+            };
+            let start = first.at.timestamp() as f64;
+            let span = (points[points.len() - 1].at.timestamp() as f64 - start).max(0.0);
+            let x = |at: DateTime<Utc>| {
+                if span == 0.0 {
+                    left + width
+                } else {
+                    left + width * ((at.timestamp() as f64 - start) / span) as f32
+                }
+            };
+            let placed: Vec<_> = points
+                .iter()
+                .map(|p| (point(x(p.at), y(p.conviction)), p.color))
+                .collect();
+
+            if placed.len() > 1 {
+                let mut line = PathBuilder::stroke(px(1.5));
+                line.move_to(placed[0].0);
+                for (p, _) in &placed[1..] {
+                    line.line_to(*p);
+                }
+                if let Ok(path) = line.build() {
+                    window.paint_path(path, tint(MUTED, 0.9));
+                }
+            }
+            for (i, (p, color)) in placed.iter().enumerate() {
+                let r = if i == placed.len() - 1 {
+                    px(4.)
+                } else {
+                    px(2.5)
+                };
+                let dot = Bounds::new(point(p.x - r, p.y - r), size(r * 2., r * 2.));
+                window.paint_quad(fill(dot, rgb(*color)).corner_radii(r));
+            }
+        },
+    )
+    .size_full()
+}
+
+/// The conviction range to plot: the points and the threshold with some
+/// padding, at least `MIN_SPAN` tall so small moves stay legible without
+/// noise looking dramatic, and kept within 0–1.
+fn conviction_scale(points: &[ConvictionPoint], threshold: f64) -> (f64, f64) {
+    const MIN_SPAN: f64 = 0.2;
+    const PAD: f64 = 0.04;
+    let (lo, hi) = points
+        .iter()
+        .map(|p| p.conviction)
+        .fold((threshold, threshold), |(lo, hi), c| (lo.min(c), hi.max(c)));
+    let (mut lo, mut hi) = (lo - PAD, hi + PAD);
+    if hi - lo < MIN_SPAN {
+        let mid = (lo + hi) / 2.0;
+        (lo, hi) = (mid - MIN_SPAN / 2.0, mid + MIN_SPAN / 2.0);
+    }
+    if lo < 0.0 {
+        (lo, hi) = (0.0, (hi - lo).min(1.0));
+    } else if hi > 1.0 {
+        (lo, hi) = ((1.0 - (hi - lo)).max(0.0), 1.0);
+    }
+    (lo, hi)
+}
+
 /// Closes mapped onto the chart's bounds, with a little vertical headroom.
 struct Plot {
     points: Vec<Point<Pixels>>,
@@ -217,6 +323,22 @@ mod tests {
             trade_count: 0,
             vwap: 1.0,
         }
+    }
+
+    #[test]
+    fn conviction_scale_zooms_but_stays_in_range() {
+        let at = |c| ConvictionPoint {
+            at: Utc::now(),
+            conviction: c,
+            color: 0,
+        };
+        let (lo, hi) = conviction_scale(&[at(0.59), at(0.56)], 0.6);
+        assert!((hi - lo - 0.2).abs() < 1e-9 && lo < 0.56 && hi > 0.6);
+        // Shifted inside 0–1, keeping the padded span.
+        let (lo, hi) = conviction_scale(&[at(0.98)], 0.6);
+        assert!((lo - 0.54).abs() < 1e-9 && hi == 1.0);
+        let (lo, hi) = conviction_scale(&[at(0.01)], 0.05);
+        assert!(lo == 0.0 && (hi - 0.2).abs() < 1e-9);
     }
 
     #[test]

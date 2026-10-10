@@ -283,6 +283,49 @@ impl AgentCtx {
 pub(crate) mod test_support {
     use super::*;
 
+    /// A minimal report for store and UI tests.
+    pub fn sample_report(symbol: &str, scoring_version: u32) -> research::ResearchReport {
+        use scoring::{FactorScore, FactorScores, JudgedFactors, QuantFactors};
+        let factor = || FactorScore {
+            score: 3,
+            reason: "test".into(),
+        };
+        let judged = JudgedFactors {
+            catalyst: factor(),
+            news_sentiment: factor(),
+            setup_quality: factor(),
+        };
+        research::ResearchReport {
+            symbol: symbol.into(),
+            generated_at: Utc::now(),
+            model: "test".into(),
+            price_at_research: Some(10.0),
+            scoring_version,
+            rating: research::Rating::Hold,
+            conviction: 0.5,
+            risk_reward: None,
+            factors: FactorScores {
+                quant: QuantFactors::default(),
+                judged: judged.clone(),
+                risk_reward: None,
+            },
+            shadow: None,
+            findings: research::ResearchFindings {
+                horizon_days: 10,
+                thesis: String::new(),
+                catalysts: vec![],
+                risks: vec![],
+                entry_low: None,
+                entry_high: None,
+                target_price: None,
+                stop_loss: None,
+                technical_summary: String::new(),
+                news_summary: String::new(),
+                factors: judged,
+            },
+        }
+    }
+
     /// A live context over a throwaway store, printing events as they arrive.
     pub fn live_ctx() -> (AgentCtx, std::path::PathBuf) {
         dotenvy::dotenv().ok();
