@@ -304,7 +304,7 @@ impl Screen {
 /// Listings exploration could pick: common stocks and ADRs on the major
 /// exchanges, not funds, warrants, units, rights, notes, or preferreds.
 fn is_screenable(asset: &crate::market::alpaca::Asset) -> bool {
-    const EXCLUDED: [&str; 10] = [
+    const EXCLUDED: [&str; 16] = [
         "ETF",
         "Fund",
         "Warrant",
@@ -315,6 +315,13 @@ fn is_screenable(asset: &crate::market::alpaca::Asset) -> bool {
         "%",
         "ETN",
         "Trust",
+        // Leveraged and inverse fund families, whose names often say neither.
+        "ProShares",
+        "Direxion",
+        "Leveraged",
+        "Inverse",
+        " 2X",
+        " 3X",
     ];
     asset.tradable
         && matches!(asset.exchange.as_str(), "NYSE" | "NASDAQ" | "AMEX")
