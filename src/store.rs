@@ -57,6 +57,23 @@ pub struct Lesson {
     pub text: String,
 }
 
+/// The stocks exploration considered on its last run: its scan and screen
+/// results, as the tools returned them.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExplorationPool {
+    pub updated_at: DateTime<Utc>,
+    /// `scan_universe`'s ranking.
+    pub scan: Option<serde_json::Value>,
+    /// `screen_market`'s most active names, gainers, and losers.
+    pub screen: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum PoolPart {
+    Scan,
+    Screen,
+}
+
 /// One agent run, for the activity log and the daily run budget.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunRecord {
@@ -174,6 +191,32 @@ impl Store {
 
     pub fn candidates(&self) -> Result<Option<CandidateList>> {
         self.read_json("candidates.json")
+    }
+
+    /// Record one of exploration's tool results as part of the pool it
+    /// considered. Results more than a few hours older than the last belong
+    /// to an earlier exploration and are replaced.
+    pub fn record_pool(&self, part: PoolPart, value: &serde_json::Value) -> Result<()> {
+        let now = Utc::now();
+        let mut pool = self
+            .pool()?
+            .filter(|p| now - p.updated_at < chrono::Duration::hours(3))
+            .unwrap_or_else(|| ExplorationPool {
+                updated_at: now,
+                scan: None,
+                screen: None,
+            });
+        pool.updated_at = now;
+        match part {
+            PoolPart::Scan => pool.scan = Some(value.clone()),
+            PoolPart::Screen => pool.screen = Some(value.clone()),
+        }
+        self.write_json("exploration_pool.json", &pool)
+    }
+
+    /// What exploration last looked at.
+    pub fn pool(&self) -> Result<Option<ExplorationPool>> {
+        self.read_json("exploration_pool.json")
     }
 
     pub fn append_journal(&self, entry: &JournalEntry) -> Result<()> {

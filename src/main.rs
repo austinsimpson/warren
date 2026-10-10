@@ -5,6 +5,7 @@ mod autopilot_ui;
 mod backtest;
 mod chart;
 mod config;
+mod exploration_ui;
 mod fundamentals;
 mod market;
 mod portfolio;
@@ -55,6 +56,8 @@ struct Warren {
     chart_generation: u64,
     /// Whether the full research report replaces the chart.
     report_open: bool,
+    /// Whether the exploration view replaces the chart.
+    exploration_open: bool,
     /// The pointer over the chart: a hovered bar, or a drag between two.
     pointer: chart::Pointer,
     /// The chart's painted bounds, for mapping the pointer to a bar.
@@ -105,6 +108,7 @@ impl Warren {
             chart_status: "".into(),
             chart_generation: 0,
             report_open: false,
+            exploration_open: false,
             pointer: Default::default(),
             chart_bounds: Default::default(),
             portfolio: Portfolio::default(),
@@ -244,10 +248,29 @@ impl Warren {
             .into_iter()
             .filter(|(_, symbols)| !symbols.is_empty())
             .map(|(name, symbols)| {
+                // The candidates heading opens what exploration found.
+                let heading = if name == "Candidates" {
+                    div()
+                        .id("candidates-heading")
+                        .px_2()
+                        .pt_2()
+                        .pb_1()
+                        .cursor_pointer()
+                        .child(label("Candidates ›").hover(|s| s.text_color(rgb(ACCENT))))
+                        .on_click(cx.listener(|this, _, _, cx| this.open_exploration(cx)))
+                        .into_any_element()
+                } else {
+                    div()
+                        .px_2()
+                        .pt_2()
+                        .pb_1()
+                        .child(label(name))
+                        .into_any_element()
+                };
                 div()
                     .flex()
                     .flex_col()
-                    .child(div().px_2().pt_2().pb_1().child(label(name)))
+                    .child(heading)
                     .children(symbols.iter().map(|symbol| self.render_row(symbol, cx)))
             })
             .collect();
@@ -570,8 +593,11 @@ impl Render for Warren {
                 .flex_1()
                 .min_w_0()
                 .child(editor.clone()),
-            None => match self.render_report(cx) {
-                Some(report) => div().flex().flex_col().flex_1().min_w_0().child(report),
+            None => match self
+                .render_report(cx)
+                .or_else(|| self.render_exploration(cx))
+            {
+                Some(view) => div().flex().flex_col().flex_1().min_w_0().child(view),
                 None => div()
                     .flex()
                     .flex_col()

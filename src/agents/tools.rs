@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 
 use super::{AgentCtx, book::Book, executor, scan, sweep, technicals};
 use crate::market::alpaca::{NewOrder, OrderSide, Timeframe};
-use crate::store::JournalEntry;
+use crate::store::{JournalEntry, PoolPart};
 
 /// Benchmark for judging past decisions.
 pub const BENCHMARK: &str = "SPY";
@@ -454,6 +454,14 @@ tool!(
 
 impl ScanUniverse {
     async fn run(&self, args: ScanArgs) -> ToolResult {
+        let output = self.ranked(args).await?;
+        if self.0.as_of.is_none() {
+            self.0.store.record_pool(PoolPart::Scan, &output).ok();
+        }
+        Ok(output)
+    }
+
+    async fn ranked(&self, args: ScanArgs) -> ToolResult {
         let ctx = &self.0;
         let universe = &ctx.strategy.universe;
         let n = args.top.clamp(1, 60) as usize;
@@ -534,6 +542,14 @@ tool!(
 
 impl ScreenMarket {
     async fn run(&self, args: ScreenArgs) -> ToolResult {
+        let output = self.screened(args).await?;
+        if self.0.as_of.is_none() {
+            self.0.store.record_pool(PoolPart::Screen, &output).ok();
+        }
+        Ok(output)
+    }
+
+    async fn screened(&self, args: ScreenArgs) -> ToolResult {
         let top = args.top.clamp(1, 50);
         let alpaca = &self.0.alpaca;
         let min_price = self.0.config.exploration.min_price;

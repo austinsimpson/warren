@@ -12,6 +12,7 @@ use crate::theme::*;
 impl Warren {
     pub fn open_report(&mut self, cx: &mut Context<Self>) {
         self.report_open = true;
+        self.exploration_open = false;
         cx.notify();
     }
 

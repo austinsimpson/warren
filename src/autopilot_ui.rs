@@ -34,6 +34,8 @@ pub struct AgentsState {
     events: VecDeque<AgentEvent>,
     pub reports: HashMap<String, ResearchReport>,
     pub candidates: Option<CandidateList>,
+    /// What exploration considered on its last run.
+    pub pool: Option<crate::store::ExplorationPool>,
     runs_today: usize,
     /// Token and dollar totals from the run log.
     pub usage: crate::scorecard::Usage,
@@ -57,6 +59,9 @@ impl AgentsState {
         }
         if let Ok(candidates) = self.ctx.store.candidates() {
             self.candidates = candidates;
+        }
+        if let Ok(pool) = self.ctx.store.pool() {
+            self.pool = pool;
         }
         if let Ok(runs) = self.ctx.store.runs() {
             self.usage = crate::scorecard::usage(&runs, &self.ctx.config, chrono::Utc::now());
@@ -137,6 +142,7 @@ impl AgentsState {
             events: VecDeque::new(),
             reports: HashMap::new(),
             candidates: None,
+            pool: None,
             runs_today: 0,
             usage: Default::default(),
             running: Vec::new(),
